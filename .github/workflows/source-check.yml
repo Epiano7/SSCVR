@@ -1,0 +1,14 @@
+name: source-check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  public-tree:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check repository contents
+        shell: pwsh
+        run: .\scripts\verify-public-tree.ps1

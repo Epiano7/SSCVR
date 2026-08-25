@@ -1,0 +1,35 @@
+# Local game copies and installs
+game/
+install/
+
+# Build output
+runtime/build*/
+dist/
+*.exe
+*.dll
+*.lib
+*.a
+*.o
+*.obj
+*.pdb
+
+# Captures and runtime diagnostics
+captures/
+headset-captures/
+*.bmp
+*.png
+*.depth32f
+*.dmp
+*.log
+*.csv
+*.ini
+*.txt
+
+# Tool caches
+__pycache__/
+*.pyc
+.vs/
+.vscode/
+
+# Keep repository policy files even though diagnostic text is ignored
+!NOTICE.txt

@@ -1,0 +1,10 @@
+SSCVR is an unofficial fan project. Skillshot City and its assets belong to
+their respective owners. Meta, Quest, OpenXR, Steam, and other names may be
+trademarks of their respective owners.
+
+The repository does not distribute Skillshot City files. The project requires
+a legitimate local installation and operates on a separate copy made on the
+user's own computer.
+
+The OpenXR loader used in release builds comes from the KhronosGroup OpenXR-SDK
+project and is distributed under the Apache License 2.0.
