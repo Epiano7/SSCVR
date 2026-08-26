@@ -13,9 +13,14 @@ $supportedBuilds = @(
         Sha256 = '40FAFE9AD3AFFA0A7C70254A757F495F613C2C6F73B9EDB609D9B62B1C65BD6D'
     },
     [pscustomobject]@{
-        Name = 'Steam build 24877062'
+        Name = 'v1.990 (revision 5)'
         Size = 15171072L
         Sha256 = '3FE88430ADFD97C5F32ED2BFC4612FF918C2FE856BB57A3BB72B3BAB7C0CDA1E'
+    },
+    [pscustomobject]@{
+        Name = 'v1.990 (revision 8)'
+        Size = 15173632L
+        Sha256 = 'B5AFB4081D8F13733DA55BBB10DC0751E1D4F4F1C4F3B15EC11308A6CDE4C3A2'
     }
 )
 

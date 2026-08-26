@@ -32,10 +32,16 @@ static const VrGameBuildLayout vr_game_build_layouts[] = {
         0x1eacc0, 0x316b50, 0xf8a060
     },
     {
-        "Steam build 24877062",
+        "v1.990 (revision 5)",
         15171072ULL,
         "3FE88430ADFD97C5F32ED2BFC4612FF918C2FE856BB57A3BB72B3BAB7C0CDA1E",
         0x1eace0, 0x316b30, 0xf8b060
+    },
+    {
+        "v1.990 (revision 8)",
+        15173632ULL,
+        "B5AFB4081D8F13733DA55BBB10DC0751E1D4F4F1C4F3B15EC11308A6CDE4C3A2",
+        0x1ead40, 0x316d70, 0xf8b0e8
     }
 };
 

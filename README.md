@@ -36,13 +36,13 @@ The alpha installer deliberately refuses to overwrite an existing SSCVR copy or 
 
 Follow [Building](docs/BUILDING.md), run `scripts/New-ReleasePackage.ps1`, and then use the installer from the generated package.
 
-## Supported game builds
+## Supported game versions
 
-The launcher and installer recognize this exact executable:
+This release supports:
 
-- Steam build `24877062`: `15,171,072` bytes, SHA-256 `3FE88430ADFD97C5F32ED2BFC4612FF918C2FE856BB57A3BB72B3BAB7C0CDA1E`
+- Skillshot City `v1.990`
 
-Steam build `24877062` passed the installer, exact-hook, no-input game, and Meta XR Simulator checks described in [the validation record](docs/VALIDATION.md). Newer/Older builds may work but are not supported at this time unless explicitly listed in a release.
+The installer still verifies the exact executable revision so that an unknown game update cannot receive unsafe hooks. Both known `v1.990` revisions passed the automated checks described in [the validation record](docs/VALIDATION.md); the newest revision's physical-headset check is still pending. Game versions not listed above may work but are not supported.
 
 ## What currently works
 
@@ -97,7 +97,7 @@ These are the main things I am working on. If a fork fixes one, feel free to ope
 - [ ] Route audio to the active OpenXR/Quest Link device without requiring a Windows output-device change (there is currently no option in game to set an output audio device).
 - [ ] Replace the temporary keyboard camera controls with an in-game settings screen/GUI.
 - [x] Add and round-trip test a clean installer and manifest-guarded uninstaller for a verified, separate Steam copy.
-- [x] Locate and verify the gameplay-render, world-draw, and culling addresses for Steam build `24877062` (latest as of 8/25/2026).
+- [x] Locate and verify the gameplay-render, world-draw, and culling addresses for both known Skillshot City `v1.990` executable revisions (latest as of 8/26/2026).
 - [x] Rebuild and install the package from a fresh GitHub clone, then confirm both live hooks in Meta XR Simulator.
 - [ ] Test more aspect ratios, refresh rates, and OpenXR runtimes.
 - [ ] Decide what online modes, if any, are safe to support. Multiplayer and ranked have not been extensively tested with this mod (from the few rounds I have played, I have placed top 3 every time).
