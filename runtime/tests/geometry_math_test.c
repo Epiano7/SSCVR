@@ -539,6 +539,25 @@ static int test_lens_safe_hud_inset(void)
            fabs(gameplay_hud_aspect - 16.0 / 9.0) < 0.0001;
 }
 
+static int test_lens_safe_menu_rect(void)
+{
+    int left[4], right[4];
+    double scale_y = vr_hud_scale_y_for_eye(
+        0.660, 1536.0, 1666.0, 16.0 / 9.0);
+    if (!vr_safe_canvas_rect_for_eye(1536, 1666, 0.492, 0.660,
+                                      scale_y, left) ||
+        !vr_safe_canvas_rect_for_eye(1536, 1666, 0.508, 0.660,
+                                      scale_y, right))
+        return 0;
+    if (left[2] != right[2] || left[3] != right[3]) return 0;
+    if (abs((left[0] + left[2] / 2) - (int)(1536 * 0.492)) > 1 ||
+        abs((right[0] + right[2] / 2) - (int)(1536 * 0.508)) > 1)
+        return 0;
+    if (fabs((double)left[2] / (double)left[3] - 16.0 / 9.0) > 0.005)
+        return 0;
+    return left[2] == 1014 && left[3] == 570 && left[1] == right[1];
+}
+
 static int test_alignment_fov_metadata(void)
 {
     float left = atanf(-1.0f), right = atanf(1.0f);
@@ -823,6 +842,7 @@ int main(int argument_count, char **arguments)
     }
     if (!test_tabletop_pivot_and_composition()) { puts("FAIL tabletop pivot"); return 8; }
     if (!test_lens_safe_hud_inset()) { puts("FAIL lens-safe HUD inset"); return 9; }
+    if (!test_lens_safe_menu_rect()) { puts("FAIL lens-safe menu rect"); return 26; }
     if (!test_alignment_fov_metadata()) { puts("FAIL alignment FOV metadata"); return 11; }
     if (!test_rendered_alignment_matches_fov_metadata()) {
         puts("FAIL rendered alignment/FOV equivalence"); return 14;

@@ -21,6 +21,11 @@ $supportedBuilds = @(
         Name = 'v1.990 (revision 8)'
         Size = 15173632L
         Sha256 = 'B5AFB4081D8F13733DA55BBB10DC0751E1D4F4F1C4F3B15EC11308A6CDE4C3A2'
+    },
+    [pscustomobject]@{
+        Name = 'v1.991 (Sep 3 revision)'
+        Size = 15221248L
+        Sha256 = '487962A3A057A7DF6574DB98536518985AF18DA6A66C145FC23F6AC35F54D154'
     }
 )
 

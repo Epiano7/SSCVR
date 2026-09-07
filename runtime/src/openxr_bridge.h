@@ -3,6 +3,10 @@
 
 /* Returns nonzero once an OpenXR instance and D3D11 session exist. */
 int openxr_bridge_tick(const char *base_directory, void *device_context);
+/* Stop the frame worker and release the OpenXR session before the owning WGL
+   context disappears. Safe to call repeatedly, including after a partial
+   initialization failure. */
+int openxr_bridge_shutdown(void);
 
 /* Captures the game's resolved world color and depth before its 2D interface.
    eye is 0/1 for native geometry or -1 for the legacy flat-depth path. */

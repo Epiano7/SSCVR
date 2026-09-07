@@ -50,6 +50,7 @@ typedef void (APIENTRY *PFNGLPIXELSTOREI)(unsigned int, int);
 typedef void (APIENTRY *PFNGLREADBUFFER)(unsigned int);
 typedef void (APIENTRY *PFNGLREADPIXELS)(int, int, int, int, unsigned int, unsigned int, void *);
 typedef PROC (WINAPI *PFNWGLGETPROCADDRESS)(LPCSTR);
+typedef BOOL (WINAPI *PFNWGLDELETECONTEXT)(HGLRC);
 typedef HGLRC (WINAPI *PFNWGLCREATECONTEXTATTRIBSARB)(HDC, HGLRC, const int *);
 typedef unsigned int (APIENTRY *PFNGLCREATESHADER)(unsigned int);
 typedef unsigned int (APIENTRY *PFNGLCREATEPROGRAM)(void);
@@ -108,6 +109,7 @@ static PFNGLPIXELSTOREI g_gl_pixel_store_i;
 static PFNGLREADBUFFER g_gl_read_buffer;
 static PFNGLREADPIXELS g_gl_read_pixels;
 static PFNWGLGETPROCADDRESS g_real_wgl_get_proc_address;
+static PFNWGLDELETECONTEXT g_real_wgl_delete_context;
 static PFNWGLCREATECONTEXTATTRIBSARB g_real_wgl_create_context_attribs;
 static PFNWGLSWAPINTERVALEXT g_real_wgl_swap_interval;
 static LONG g_vr_swap_interval_logged;
@@ -230,7 +232,6 @@ static int (WSAAPI *g_real_wsa_send_to)(SOCKET, LPWSABUF, DWORD, LPDWORD, DWORD,
                                         LPWSAOVERLAPPED_COMPLETION_ROUTINE);
 static LONG g_blocked_network_calls;
 static int g_vr_runtime_disabled;
-static ULONGLONG g_vr_window_resize_tick;
 static HWND g_game_window;
 static int g_geometry_hook_requested;
 static LONG g_geometry_hook_attempted;
@@ -408,7 +409,7 @@ static void load_camera_tuning(void)
             g_tabletop_pitch_degrees = value;
         if (strcmp(key, "tabletop_horizontal_offset") == 0 && value >= -2400.0f && value <= 2400.0f)
             g_tabletop_horizontal_offset = value;
-        if (strcmp(key, "tabletop_vertical_offset") == 0 && value >= -1200.0f && value <= 600.0f)
+        if (strcmp(key, "tabletop_vertical_offset") == 0 && value >= -1600.0f && value <= 1000.0f)
             g_tabletop_vertical_offset = value;
         if (strcmp(key, "tabletop_pivot_distance") == 0 && value >= 500.0f && value <= 10000.0f)
             g_tabletop_pivot_distance = value;
@@ -551,11 +552,13 @@ static void poll_tabletop_tuning(void)
                  g_tabletop_pitch_degrees, g_tabletop_vertical_offset,
                  g_geometry_vertical_fov_scale);
     }
-    if (changed)
+    if (changed) {
+        camera_tuning_changed();
         log_line("Tabletop tuning: pitch=%.1f vertical=%.1f zoom=%.2f "
                  "(Ctrl+Alt arrows/PageUp/PageDown/Plus/Minus; End saves)",
                  g_tabletop_pitch_degrees, g_tabletop_vertical_offset,
                  g_geometry_vertical_fov_scale);
+    }
 }
 
 static int patch_gameplay_render(void);
@@ -726,6 +729,9 @@ static void initialize_gl_diagnostics(void)
 
 static void record_draw(char kind, unsigned int mode, int count)
 {
+    if (g_interface_alpha_capture_active &&
+        (kind == 'L' || kind == 'C' || kind == 'T'))
+        openxr_bridge_begin_interface_alpha_draw(0);
     if (g_projection_is_orthographic) {
         InterlockedIncrement(&g_interface_draw_calls_current);
         InterlockedAdd64(&g_interface_vertices_current, count > 0 ? count : 1);
@@ -1408,41 +1414,16 @@ static BOOL WINAPI hooked_swap_buffers(HDC device_context)
         g_game_window = swap_window;
         ensure_camera_input_window(swap_window);
     }
-    if (g_camera_save_due && GetTickCount64() >= g_camera_save_due &&
-        !g_camera_drag_active) {
+    if (g_camera_save_due && GetTickCount64() >= g_camera_save_due) {
         if (save_camera_tuning()) show_camera_tuning_in_title("saved");
         g_camera_save_due = 0;
     }
-    if (!g_vr_runtime_disabled && g_gl_get_integerv) {
-        /* Keep a 1920x1080 source: materially sharper text and desktop output
-           than the rejected 1728 target, while retaining most of its stereo
-           raster savings versus the game's 2560-wide maximum. Account for Windows DPI
-           virtualization by converting physical GL pixels to client units. */
-        HWND window = g_game_window;
-        int viewport[4] = {0};
-        RECT client = {0};
-        g_gl_get_integerv(GL_VIEWPORT, viewport);
-        ULONGLONG now = GetTickCount64();
-        if (window && GetClientRect(window, &client) && viewport[2] > 1920 &&
-            now - g_vr_window_resize_tick >= 2000) {
-            g_vr_window_resize_tick = now;
-            int client_width = client.right - client.left;
-            int client_height = client.bottom - client.top;
-            int target_client_width = MulDiv(1920, client_width, viewport[2]);
-            int target_client_height = MulDiv(1080, client_height, viewport[3]);
-            RECT target = {0, 0, target_client_width, target_client_height};
-            DWORD style = (DWORD)GetWindowLongPtrA(window, GWL_STYLE);
-            DWORD ex_style = (DWORD)GetWindowLongPtrA(window, GWL_EXSTYLE);
-            AdjustWindowRectEx(&target, style, FALSE, ex_style);
-            ShowWindow(window, SW_RESTORE);
-            if (SetWindowPos(window, NULL, 0, 0, target.right - target.left,
-                             target.bottom - target.top,
-                             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED)) {
-                log_line("VR source window resized from GL %dx%d to 1920x1080 balanced-quality target",
-                         viewport[2], viewport[3]);
-            }
-        }
-    }
+    /* Preserve the game's selected desktop mode and native framebuffer size.
+       Forcing a 1920x1080 client while the game maintains a 2560x1440
+       borderless window creates a resize loop and a partially filled default
+       framebuffer. OpenXR eye resolution is controlled independently by the
+       bridge, so leaving the desktop window alone does not enlarge the eye
+       swapchains. */
     LONG frame = InterlockedIncrement(&g_frame_count);
     if (InterlockedExchange(&g_draw_capture_active, 0)) {
         dump_draw_events(frame);
@@ -1462,10 +1443,12 @@ static BOOL WINAPI hooked_swap_buffers(HDC device_context)
            of relying only on a draw-count heuristic. Update the classifier
            before selecting/capturing this frame's presentation source. */
         int explicit_full_interface = g_cursor_clip_suspended ||
+            g_test_held_key == VK_TAB ||
             (GetAsyncKeyState(VK_TAB) & 0x8000);
         int classified_draws = explicit_full_interface ? 1000 : (int)interface_draws;
         openxr_bridge_set_interface_load(classified_draws,
-                                         (long long)interface_vertices);
+                                         explicit_full_interface
+                                             ? -1 : (long long)interface_vertices);
         int presentation_active = openxr_bridge_set_geometry_active(geometry_active);
         update_game_cursor_clip(presentation_active, interface_draws <= 180);
         if (g_geometry_has_presented_eye && !presentation_active)
@@ -1484,7 +1467,10 @@ static BOOL WINAPI hooked_swap_buffers(HDC device_context)
                      cull_hook ? "installed" : "not installed", g_world_eye_separation);
         }
         if (g_geometry_has_presented_eye && presentation_active)
-            openxr_bridge_present_mirror_eye(0, g_geometry_vertical_fov_scale);
+            /* Keep the desktop mirror at the game's native 16:9 framing.
+               vertical_fov_scale expands the VR camera and must not crop the
+               ordinary monitor output around its centre. */
+            openxr_bridge_present_mirror_eye(0, 1.0f);
         openxr_bridge_present_desktop_interface();
     }
     /* Explicit marker-driven controls support supervised, repeatable tests of
@@ -1637,6 +1623,17 @@ __declspec(dllexport) void APIENTRY glDrawArrays(unsigned int mode, int first, i
         }
     }
     capture_stage_if_needed();
+}
+
+__declspec(dllexport) void APIENTRY glColorMask(unsigned char red,
+    unsigned char green, unsigned char blue, unsigned char alpha)
+{
+    typedef void (APIENTRY *ColorMaskProc)(unsigned char, unsigned char,
+                                         unsigned char, unsigned char);
+    static ColorMaskProc real_color_mask;
+    if (!real_color_mask) real_color_mask = (ColorMaskProc)real_gl_proc("glColorMask");
+    if (real_color_mask) real_color_mask(red, green, blue,
+        g_interface_alpha_capture_active ? 1 : alpha);
 }
 
 __declspec(dllexport) void APIENTRY glBlendFunc(unsigned int source,
@@ -1825,8 +1822,13 @@ static void hooked_gameplay_render(void)
        completed draw count reaches SwapBuffers. Draw-count-only interfaces
        (level-up/results) enter this path on their second settled frame. */
     int explicit_full_interface = g_cursor_clip_suspended ||
+        g_test_held_key == VK_TAB ||
         (GetAsyncKeyState(VK_TAB) & 0x8000);
-    g_full_interface_capture_requested = explicit_full_interface;
+    /* The previous completed frame also identifies non-keyboard overlays
+       such as level-up/results. Capture those before their first ortho draw
+       on the next frame instead of leaving them baked into the stereo eye. */
+    g_full_interface_capture_requested = explicit_full_interface ||
+        openxr_bridge_interface_heavy();
     if (explicit_full_interface)
         openxr_bridge_set_interface_load(1000, 0);
     /* The complete gameplay root updates camera, visibility, audio, and frame
@@ -1875,6 +1877,10 @@ static void hooked_gameplay_render(void)
     g_original_gameplay_render();
     QueryPerformanceCounter(&render_finished);
     g_menu_baseline_pending = 0;
+    /* Retain the desktop eye in ordinary GL storage. Re-locking a shared
+       WRITE_DISCARD eye merely to read its old contents violates its access
+       contract and competes with the D3D resolver. */
+    if (eye == 0) openxr_bridge_capture_native_mirror(1);
     QueryPerformanceCounter(&mirror_finished);
     if (InterlockedCompareExchange(&g_geometry_first_pass_logged, 1, 0) == 0)
         log_line("True-geometry alternating eye render returned (eye=%d)", eye);
@@ -2473,6 +2479,23 @@ static BOOL WINAPI hooked_wgl_swap_interval(int interval)
         log_line("VR render pacing disabled desktop swap interval (requested=%d applied=0)",
                  interval);
     return g_real_wgl_swap_interval(applied);
+}
+
+__declspec(dllexport) BOOL WINAPI wglDeleteContext(HGLRC context)
+{
+    if (!g_real_wgl_delete_context)
+        g_real_wgl_delete_context =
+            (PFNWGLDELETECONTEXT)real_gl_proc("wglDeleteContext");
+    /* This is the final normal point at which the game's WGL context is
+       guaranteed to exist. End the XR session and unregister shared textures
+       before the system OpenGL implementation destroys that context. */
+    if (!g_vr_runtime_disabled) {
+        int clean = openxr_bridge_shutdown();
+        log_line("OpenXR cleanup before wglDeleteContext: %s",
+                 clean ? "complete" : "timed out");
+    }
+    return g_real_wgl_delete_context
+        ? g_real_wgl_delete_context(context) : FALSE;
 }
 
 __declspec(dllexport) PROC WINAPI wglGetProcAddress(LPCSTR name)

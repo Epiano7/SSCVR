@@ -165,6 +165,11 @@ static int g_failed;
 static unsigned long g_submitted_frames;
 static LONG g_frame_thread_started;
 static HANDLE g_frame_thread;
+static LONG g_shutdown_requested;
+static LONG g_shutdown_started;
+static LONG g_shutdown_complete;
+static ULONGLONG g_session_stopped_tick;
+static int g_session_stall_logged;
 static ULONGLONG g_last_slow_frame_log;
 static ULONGLONG g_cadence_window_start;
 static unsigned long g_cadence_submitted_start;
@@ -231,6 +236,7 @@ static int g_interface_alpha_draws;
 static int g_interface_alpha_desktop_ready;
 static GLint g_interface_alpha_saved_draw_framebuffer;
 static GLint g_interface_alpha_saved_blend[4];
+static GLint g_interface_alpha_saved_color_mask[4];
 static GLint g_interface_alpha_saved_blend_equation[2];
 static GLuint g_interop_framebuffer;
 static GLuint g_hud_base_source_textures[EYE_COUNT];
@@ -316,6 +322,7 @@ static int g_interface_draw_calls;
 static long long g_interface_vertices;
 static int g_interface_heavy = 1;
 static int g_interface_light_frames;
+static int g_interface_heavy_candidate_frames;
 static int g_interface_mode_initialized;
 static ULONGLONG g_interface_heavy_since_tick;
 static int g_content_x;
@@ -332,6 +339,7 @@ static int g_interface_content_x;
 static int g_interface_content_y;
 static int g_interface_content_width;
 static int g_interface_content_height;
+static int g_interface_present_rect[EYE_COUNT][4];
 static HWND g_game_window;
 static HWND g_logged_game_window;
 static HCURSOR g_cursor_handle;
@@ -365,6 +373,9 @@ static char g_geometry_presented_proof_path[EYE_COUNT][MAX_PATH];
 static int g_geometry_presented_proof_written[EYE_COUNT];
 static char g_geometry_final_interface_proof_path[EYE_COUNT][MAX_PATH];
 static int g_geometry_final_interface_proof_written[EYE_COUNT];
+static char g_stereo_diagnostic_path[5][MAX_PATH];
+static char g_stereo_diagnostic_report_path[MAX_PATH];
+static LONG g_stereo_diagnostic_started;
 static char g_geometry_hud_base_proof_path[EYE_COUNT][MAX_PATH];
 static int g_geometry_hud_base_proof_written[EYE_COUNT];
 static char g_interface_alpha_proof_path[MAX_PATH];
@@ -405,6 +416,7 @@ static PFNGLTEXPARAMETERIRAW p_glTexParameteriRaw;
 static PFNGLGETFLOATVRAW p_glGetFloatvRaw;
 static PFNGLCLEARCOLORRAW p_glClearColorRaw;
 static PFNGLCLEARRAW p_glClearRaw;
+static void (APIENTRY *p_glColorMaskRaw)(GLboolean, GLboolean, GLboolean, GLboolean);
 static PFNGLBLENDFUNCSEPARATERAW p_glBlendFuncSeparateRaw;
 static PFNGLISENABLEDRAW p_glIsEnabledRaw;
 static PFNGLENABLEDISABLERAW p_glEnableRaw;
@@ -431,6 +443,7 @@ static void capture_composite_proof(ID3D11Texture2D *source,
                                     const char *marker,
                                     const char *path, int *written,
                                     const char *label);
+static void start_stereo_diagnostic_if_ready(void);
 
 static void load_display_config(const char *base_directory)
 {
@@ -519,8 +532,10 @@ static PFN_xrEnumerateViewConfigurationViews p_xrEnumerateViewConfigurationViews
 static PFN_xrCreateSession p_xrCreateSession;
 static PFN_xrDestroySession p_xrDestroySession;
 static PFN_xrCreateReferenceSpace p_xrCreateReferenceSpace;
+static PFN_xrDestroySpace p_xrDestroySpace;
 static PFN_xrEnumerateSwapchainFormats p_xrEnumerateSwapchainFormats;
 static PFN_xrCreateSwapchain p_xrCreateSwapchain;
+static PFN_xrDestroySwapchain p_xrDestroySwapchain;
 static PFN_xrEnumerateSwapchainImages p_xrEnumerateSwapchainImages;
 static PFN_xrAcquireSwapchainImage p_xrAcquireSwapchainImage;
 static PFN_xrWaitSwapchainImage p_xrWaitSwapchainImage;
@@ -528,6 +543,7 @@ static PFN_xrReleaseSwapchainImage p_xrReleaseSwapchainImage;
 static PFN_xrPollEvent p_xrPollEvent;
 static PFN_xrBeginSession p_xrBeginSession;
 static PFN_xrEndSession p_xrEndSession;
+static PFN_xrRequestExitSession p_xrRequestExitSession;
 static PFN_xrWaitFrame p_xrWaitFrame;
 static PFN_xrBeginFrame p_xrBeginFrame;
 static PFN_xrEndFrame p_xrEndFrame;
@@ -668,8 +684,10 @@ static int load_openxr(const char *base_directory)
     LOAD_CORE(xrCreateSession);
     LOAD_CORE(xrDestroySession);
     LOAD_CORE(xrCreateReferenceSpace);
+    LOAD_CORE(xrDestroySpace);
     LOAD_CORE(xrEnumerateSwapchainFormats);
     LOAD_CORE(xrCreateSwapchain);
+    LOAD_CORE(xrDestroySwapchain);
     LOAD_CORE(xrEnumerateSwapchainImages);
     LOAD_CORE(xrAcquireSwapchainImage);
     LOAD_CORE(xrWaitSwapchainImage);
@@ -677,6 +695,7 @@ static int load_openxr(const char *base_directory)
     LOAD_CORE(xrPollEvent);
     LOAD_CORE(xrBeginSession);
     LOAD_CORE(xrEndSession);
+    LOAD_CORE(xrRequestExitSession);
     LOAD_CORE(xrWaitFrame);
     LOAD_CORE(xrBeginFrame);
     LOAD_CORE(xrEndFrame);
@@ -840,8 +859,8 @@ static int initialize_pair_sharpen_compositor(void)
         " if(sharpen.z>0.5) {"
         "  float4 baseHere=hudBase.Sample(linearSampler,uv);"
         "  float oldDiff=max(abs(c.r-baseHere.r),max(abs(c.g-baseHere.g),abs(c.b-baseHere.b)));"
-        "  float topCenter=(uv.y<0.40&&uv.x>0.22&&uv.x<0.78)?1.0:0.0;"
-        "  float midPrompt=(uv.y>0.48&&uv.y<0.64&&uv.x>0.22&&uv.x<0.78)?1.0:0.0;"
+        "  float topCenter=(uv.y<0.46&&uv.x>0.22&&uv.x<0.78)?1.0:0.0;"
+        "  float midPrompt=(uv.y>0.38&&uv.y<0.68&&uv.x>0.22&&uv.x<0.78)?1.0:0.0;"
         /* HUD arrows can travel anywhere around the player/target.  Restricting
            the shared pass to edge rectangles left START GAME in the independent
            eye images and created distance-dependent double vision.  oldDiff
@@ -876,8 +895,14 @@ static int initialize_pair_sharpen_compositor(void)
         "   originalStructure=max(smoothstep(0.035,0.100,oldResidual),"
         "                         smoothstep(0.025,0.065,oldChroma));"
         "  }"
-        "  float oldMask=(sharpen.w>0.5?originalStructure:"
-        "    smoothstep(0.045,0.115,oldDiff))*fixedRegion;"
+        /* A center announcement is reconstructed later from the shared HUD.
+           Remove its whole authored rectangle from this eye first. Replacing
+           sourceColor with the same-eye hudBase is lossless where no overlay
+           exists and prevents translucent flare pixels from retaining a copy
+           of this eye's old map. */
+        "  float centerOverlay=max(topCenter,midPrompt);"
+        "  float oldMask=max((sharpen.w>0.5?originalStructure:"
+        "    smoothstep(0.045,0.115,oldDiff))*fixedRegion,centerOverlay);"
         "  outputRgb=lerp(outputRgb,baseHere.rgb,oldMask);"
         "  float2 local=(uv-safeArea.xy)/safeArea.zw;"
         "  if(all(local>=0)&&all(local<=1)) {"
@@ -887,8 +912,8 @@ static int initialize_pair_sharpen_compositor(void)
         "   float3 hudDelta=hud.rgb-hudUnder.rgb;"
         "   float hudDiff=max(abs(hudDelta.r),max(abs(hudDelta.g),abs(hudDelta.b)));"
         "   float hudPositive=max(hudDelta.r,max(hudDelta.g,hudDelta.b));"
-        "   float sourceCenter=(sourceUv.y<0.40&&sourceUv.x>0.22&&sourceUv.x<0.78)?1.0:0.0;"
-        "   float sourceMidPrompt=(sourceUv.y>0.48&&sourceUv.y<0.64&&sourceUv.x>0.22&&sourceUv.x<0.78)?1.0:0.0;"
+        "   float sourceCenter=(sourceUv.y<0.46&&sourceUv.x>0.22&&sourceUv.x<0.78)?1.0:0.0;"
+        "   float sourceMidPrompt=(sourceUv.y>0.38&&sourceUv.y<0.68&&sourceUv.x>0.22&&sourceUv.x<0.78)?1.0:0.0;"
         "   float sourceFixed=1.0;"
         /* Center announcements and prompts often use a translucent surround.
            Transfer their bright authored pixels, not the recoloured world
@@ -898,7 +923,8 @@ static int initialize_pair_sharpen_compositor(void)
         "   float residual=0.0;"
         "   float edgeScale=1.0;"
         "   float3 menuColor=hud.rgb;"
-        "   if(sharpen.w>0.5) {"
+        "   float centerOverlay=max(sourceCenter,sourceMidPrompt);"
+        "   if(sharpen.w>0.5||centerOverlay>0.5) {"
         "    float2 ex=float2(sharpen.x*8,0),ey=float2(0,sharpen.y*8);"
         "    float3 cpx=sharedHud.Sample(linearSampler,sourceUv+ex).rgb;"
         "    float3 cnx=sharedHud.Sample(linearSampler,sourceUv-ex).rgb;"
@@ -936,7 +962,32 @@ static int initialize_pair_sharpen_compositor(void)
         "   float hudMask=(sharpen.w>0.5?interfaceStructure:"
         "     smoothstep(0.040,0.105,hudSignal))*sourceFixed;"
         "   float3 resolvedHud=lerp(menuColor,authoredColor,authoredMask);"
-        "   outputRgb=lerp(outputRgb,resolvedHud,hudMask);"
+        /* For ordinary center announcements, transfer the locally recovered
+           attenuation and tint onto the destination eye instead of copying
+           the already-composited source pixel. This preserves translucent
+           bars and flares while making it mathematically impossible for the
+           old source-eye gameplay image to appear inside them. */
+        "   if(sharpen.w<0.5&&centerOverlay>0.5) {"
+        /* A flat translucent panel has no local gradients, so edgeScale
+           collapses to zero and the previous version treated the complete
+           source-eye pixel as authored tint. Recover attenuation from the
+           minimum colour ratio instead: positive overlay tint can only raise
+           that ratio, so no source-eye spatial detail survives the transfer. */
+        "    float3 safeUnder=max(hudUnder.rgb,float3(0.015,0.015,0.015));"
+        "    float centerScale=clamp(min(hud.r/safeUnder.r,"
+        "      min(hud.g/safeUnder.g,hud.b/safeUnder.b)),0.0,1.0);"
+        "    float3 positiveTint=max(hud.rgb-centerScale*hudUnder.rgb,0.0);"
+        "    float3 transferred=saturate(centerScale*outputRgb+positiveTint);"
+        /* Bright glyphs and icons are effectively opaque. Preserve their
+           authored colour exactly so text aligns and stays readable. */
+        "    float centerBright=max(hud.r,max(hud.g,hud.b));"
+        "    float centerOpaque=smoothstep(0.70,0.92,centerBright)*"
+        "      smoothstep(0.15,0.40,hudDiff);"
+        "    transferred=lerp(transferred,authoredColor,centerOpaque);"
+        "    float transferSignal=max(hudSignal,max(residual,hudPositive));"
+        "    float transferMask=smoothstep(0.010,0.045,transferSignal);"
+        "    outputRgb=lerp(outputRgb,transferred,transferMask);"
+        "   } else outputRgb=lerp(outputRgb,resolvedHud,hudMask);"
         "  }"
         " }"
         " return float4(outputRgb,c.a); }";
@@ -1018,6 +1069,10 @@ static int initialize_menu_overlay_compositor(void)
            A is exact accumulated coverage, with no world pixels involved. */
         " float rawAlpha=saturate(overlay.a);"
         " float3 straightColor=saturate(overlay.rgb/max(rawAlpha,0.002));"
+        /* The legacy UI texture contains display-encoded RGB. An sRGB RTV
+           encodes shader output again, so decode before hardware blending. */
+        " if(sharpen.w>0.5) straightColor=lerp(straightColor/12.92,"
+        "   pow((straightColor+0.055)/1.055,2.4),step(0.04045,straightColor));"
         " return float4(straightColor,rawAlpha); }";
     ID3DBlob *pixel_blob = NULL;
     ID3DBlob *errors = NULL;
@@ -1057,15 +1112,19 @@ static int initialize_menu_overlay_compositor(void)
 static int render_menu_overlay_layer(ID3D11RenderTargetView *target,
                                      ID3D11Texture2D *destination,
                                      int width, int height,
-                                     int blend_over_world)
+                                     int eye, int blend_over_world,
+                                     XrRect2Di *present_rect)
 {
     if (!target || !destination || width <= 0 || height <= 0 ||
+        eye < 0 || eye >= EYE_COUNT ||
         !g_menu_overlay_ready || !g_menu_overlay_exact_alpha ||
         g_interface_content_width <= 0 || g_interface_content_height <= 0 ||
         !g_menu_overlay_pixel_shader || !g_menu_interop_views[0]) return 0;
     float constants[12] = {
         1.0f / (float)g_eyes[0].width,
-        1.0f / (float)g_eyes[0].height, 0, 0,
+        1.0f / (float)g_eyes[0].height, 0,
+        (g_swapchain_format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ||
+         g_swapchain_format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB) ? 1.0f : 0.0f,
         (float)g_interface_content_x / (float)g_eyes[0].width,
         (float)g_interface_content_y / (float)g_eyes[0].height,
         (float)g_interface_content_width / (float)g_eyes[0].width,
@@ -1078,12 +1137,21 @@ static int render_menu_overlay_layer(ID3D11RenderTargetView *target,
     D3D11_VIEWPORT viewport = {
         0, 0, (float)width, (float)height, 0, 1
     };
-    if (blend_over_world && g_interface_content_width > 0 &&
-        g_interface_content_height > 0) {
-        viewport.TopLeftX = (float)g_interface_content_x;
-        viewport.TopLeftY = (float)g_interface_content_y;
-        viewport.Width = (float)g_interface_content_width;
-        viewport.Height = (float)g_interface_content_height;
+    int destination_rect[4] = {0, 0, width, height};
+    if (blend_over_world) {
+        float optical_center = 0.5f;
+        if (g_geometry_fov_valid[eye])
+            vr_projection_optical_center_x_f(
+                g_pending_pair_fov[eye].angleLeft,
+                g_pending_pair_fov[eye].angleRight, &optical_center);
+        if (!vr_safe_canvas_rect_for_eye(
+                width, height, optical_center, g_native_hud_safe_scale_x,
+                g_native_hud_safe_scale_y, destination_rect))
+            return 0;
+        viewport.TopLeftX = (float)destination_rect[0];
+        viewport.TopLeftY = (float)destination_rect[1];
+        viewport.Width = (float)destination_rect[2];
+        viewport.Height = (float)destination_rect[3];
     }
     ID3D11ShaderResourceView *views[2] = {
         g_menu_interop_views[0], NULL
@@ -1110,11 +1178,22 @@ static int render_menu_overlay_layer(ID3D11RenderTargetView *target,
     ID3D11ShaderResourceView *empty[2] = {NULL, NULL};
     ID3D11DeviceContext_PSSetShaderResources(g_context, 0, 2, empty);
     ID3D11DeviceContext_OMSetRenderTargets(g_context, 0, NULL, NULL);
+    memcpy(g_interface_present_rect[eye], destination_rect,
+           sizeof(destination_rect));
+    if (present_rect) {
+        present_rect->offset.x = destination_rect[0];
+        present_rect->offset.y = destination_rect[1];
+        present_rect->extent.width = destination_rect[2];
+        present_rect->extent.height = destination_rect[3];
+    }
     if (!g_menu_overlay_logged) {
         xr_log("Pause/Tab/level-up UI composited into both projection eyes "
-               "from stable rect %d,%d %dx%d (current projection rect %d,%d %dx%d)",
+               "from source rect %d,%d %dx%d into HUD-safe rect %d,%d %dx%d "
+               "(current projection rect %d,%d %dx%d)",
                g_interface_content_x, g_interface_content_y,
                g_interface_content_width, g_interface_content_height,
+               destination_rect[0], destination_rect[1],
+               destination_rect[2], destination_rect[3],
                g_content_x, g_content_y, g_content_width, g_content_height);
         g_menu_overlay_logged = 1;
     }
@@ -1202,6 +1281,7 @@ static int initialize_gl_interop(void)
     p_glGetFloatvRaw = system_gl ? (PFNGLGETFLOATVRAW)GetProcAddress(system_gl, "glGetFloatv") : NULL;
     p_glClearColorRaw = system_gl ? (PFNGLCLEARCOLORRAW)GetProcAddress(system_gl, "glClearColor") : NULL;
     p_glClearRaw = system_gl ? (PFNGLCLEARRAW)GetProcAddress(system_gl, "glClear") : NULL;
+    p_glColorMaskRaw = system_gl ? (void *)GetProcAddress(system_gl, "glColorMask") : NULL;
     p_glIsEnabledRaw = system_gl ? (PFNGLISENABLEDRAW)GetProcAddress(system_gl, "glIsEnabled") : NULL;
     p_glEnableRaw = system_gl ? (PFNGLENABLEDISABLERAW)GetProcAddress(system_gl, "glEnable") : NULL;
     p_glDisableRaw = system_gl ? (PFNGLENABLEDISABLERAW)GetProcAddress(system_gl, "glDisable") : NULL;
@@ -1488,6 +1568,7 @@ int openxr_bridge_begin_interface_alpha_capture(void)
     p_glGetIntegerv(GL_BLEND_EQUATION_ALPHA,
                     &g_interface_alpha_saved_blend_equation[1]);
     p_glGetFloatvRaw(GL_COLOR_CLEAR_VALUE, previous_clear);
+    p_glGetIntegerv(GL_COLOR_WRITEMASK, g_interface_alpha_saved_color_mask);
     if (!g_interface_alpha_textures[0])
         p_glGenTextures(2, g_interface_alpha_textures);
     if (!g_interface_alpha_framebuffer)
@@ -1506,12 +1587,22 @@ int openxr_bridge_begin_interface_alpha_capture(void)
     int complete = p_glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) ==
                    GL_FRAMEBUFFER_COMPLETE;
     if (complete) {
+        /* An authored UI clip must not limit clearing our private texture;
+           otherwise pixels from the previous menu survive outside the clip. */
+        GLboolean scissor_enabled = p_glIsEnabledRaw(GL_SCISSOR_TEST);
+        p_glDisableRaw(GL_SCISSOR_TEST);
+        if (p_glColorMaskRaw) p_glColorMaskRaw(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         p_glClearColorRaw(0.0f, 0.0f, 0.0f, 0.0f);
         p_glClearRaw(GL_COLOR_BUFFER_BIT);
+        if (scissor_enabled) p_glEnableRaw(GL_SCISSOR_TEST);
         /* Preserve the game's RGB blend equation while accumulating alpha as
            ordinary source-over coverage. This makes the texture's RGB
            premultiplied and its A channel exact even for overlapping panels,
            antialiased glyphs, and translucent menu fills. */
+        if (p_glColorMaskRaw) p_glColorMaskRaw(
+            (GLboolean)g_interface_alpha_saved_color_mask[0],
+            (GLboolean)g_interface_alpha_saved_color_mask[1],
+            (GLboolean)g_interface_alpha_saved_color_mask[2], GL_TRUE);
         p_glBlendFuncSeparateRaw(
             (GLenum)g_interface_alpha_saved_blend[0],
             (GLenum)g_interface_alpha_saved_blend[1],
@@ -1569,10 +1660,25 @@ int openxr_bridge_finish_interface_alpha_capture(int publish)
         return 0;
     }
     g_interface_alpha_active = 0;
+    static int mask_logged;
+    if (!mask_logged) {
+        GLint mask[4];
+        p_glGetIntegerv(GL_COLOR_WRITEMASK, mask);
+        xr_log("Interface color-write mask saved=%d/%d/%d/%d final=%d/%d/%d/%d",
+            g_interface_alpha_saved_color_mask[0], g_interface_alpha_saved_color_mask[1],
+            g_interface_alpha_saved_color_mask[2], g_interface_alpha_saved_color_mask[3],
+            mask[0], mask[1], mask[2], mask[3]);
+        mask_logged = 1;
+    }
     /* UI drawing is complete. Restore the game's framebuffer and complete
        blend state before the D3D copy or any later desktop presentation. */
     p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER,
                         (GLuint)g_interface_alpha_saved_draw_framebuffer);
+    if (p_glColorMaskRaw) p_glColorMaskRaw(
+        (GLboolean)g_interface_alpha_saved_color_mask[0],
+        (GLboolean)g_interface_alpha_saved_color_mask[1],
+        (GLboolean)g_interface_alpha_saved_color_mask[2],
+        (GLboolean)g_interface_alpha_saved_color_mask[3]);
     p_glBlendFuncSeparateRaw(
         (GLenum)g_interface_alpha_saved_blend[0],
         (GLenum)g_interface_alpha_saved_blend[1],
@@ -1638,6 +1744,12 @@ int openxr_bridge_finish_interface_alpha_capture(int publish)
                    p_glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) ==
                        GL_FRAMEBUFFER_COMPLETE;
     if (complete) {
+        /* Both clear and blit obey scissor; clear also obeys the game's
+           restored RGB/alpha write mask. Initialize all letterbox pixels and
+           transfer the whole menu, then put the authored state back. */
+        GLboolean scissor_enabled = p_glIsEnabledRaw(GL_SCISSOR_TEST);
+        p_glDisableRaw(GL_SCISSOR_TEST);
+        p_glColorMaskRaw(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
         p_glClearColorRaw(0.0f, 0.0f, 0.0f, 0.0f);
         p_glClearRaw(GL_COLOR_BUFFER_BIT);
         p_glBlitFramebuffer(0, 0,
@@ -1646,6 +1758,12 @@ int openxr_bridge_finish_interface_alpha_capture(int publish)
                             x, y + fitted_height,
                             x + fitted_width, y,
                             GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        p_glColorMaskRaw(
+            (GLboolean)g_interface_alpha_saved_color_mask[0],
+            (GLboolean)g_interface_alpha_saved_color_mask[1],
+            (GLboolean)g_interface_alpha_saved_color_mask[2],
+            (GLboolean)g_interface_alpha_saved_color_mask[3]);
+        if (scissor_enabled) p_glEnableRaw(GL_SCISSOR_TEST);
     }
     p_glFinish();
     p_glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
@@ -2646,21 +2764,285 @@ static void capture_composite_proof(ID3D11Texture2D *source, const char *marker,
     ID3D11Texture2D_Release(staging);
 }
 
+typedef struct StereoDiagnosticBitmap {
+    int width;
+    int height;
+    unsigned char *bgra;
+} StereoDiagnosticBitmap;
+
+static void free_stereo_diagnostic_bitmap(StereoDiagnosticBitmap *bitmap)
+{
+    if (!bitmap) return;
+    free(bitmap->bgra);
+    memset(bitmap, 0, sizeof(*bitmap));
+}
+
+static int load_stereo_diagnostic_bitmap(const char *path,
+                                         StereoDiagnosticBitmap *bitmap)
+{
+    memset(bitmap, 0, sizeof(*bitmap));
+    FILE *file = fopen(path, "rb");
+    if (!file) return 0;
+    BITMAPFILEHEADER file_header;
+    BITMAPINFOHEADER info_header;
+    int ok = fread(&file_header, sizeof(file_header), 1, file) == 1 &&
+             fread(&info_header, sizeof(info_header), 1, file) == 1 &&
+             file_header.bfType == 0x4D42 && info_header.biBitCount == 32 &&
+             info_header.biCompression == BI_RGB && info_header.biWidth > 0 &&
+             info_header.biHeight != 0;
+    int height = info_header.biHeight < 0 ? -info_header.biHeight : info_header.biHeight;
+    size_t bytes = ok ? (size_t)info_header.biWidth * (size_t)height * 4u : 0;
+    unsigned char *pixels = bytes ? (unsigned char *)malloc(bytes) : NULL;
+    if (!pixels || fseek(file, (long)file_header.bfOffBits, SEEK_SET) != 0) ok = 0;
+    if (ok) {
+        size_t row_bytes = (size_t)info_header.biWidth * 4u;
+        for (int y = 0; y < height; ++y) {
+            int source_y = info_header.biHeight > 0 ? height - 1 - y : y;
+            if (fseek(file, (long)file_header.bfOffBits +
+                            (long)((size_t)source_y * row_bytes), SEEK_SET) != 0 ||
+                fread(pixels + (size_t)y * row_bytes, row_bytes, 1, file) != 1) {
+                ok = 0;
+                break;
+            }
+        }
+    }
+    fclose(file);
+    if (!ok) { free(pixels); return 0; }
+    bitmap->width = info_header.biWidth;
+    bitmap->height = height;
+    bitmap->bgra = pixels;
+    return 1;
+}
+
+static int write_stereo_diagnostic_bitmap(const char *path, int width, int height,
+                                           const unsigned char *top_down_bgra)
+{
+    if (!path || width <= 0 || height <= 0 || !top_down_bgra) return 0;
+    FILE *file = fopen(path, "wb");
+    if (!file) return 0;
+    size_t row_bytes = (size_t)width * 4u;
+    BITMAPFILEHEADER file_header;
+    BITMAPINFOHEADER info_header;
+    memset(&file_header, 0, sizeof(file_header));
+    memset(&info_header, 0, sizeof(info_header));
+    file_header.bfType = 0x4D42;
+    file_header.bfOffBits = sizeof(file_header) + sizeof(info_header);
+    file_header.bfSize = (DWORD)(file_header.bfOffBits + row_bytes * (size_t)height);
+    info_header.biSize = sizeof(info_header);
+    info_header.biWidth = width;
+    info_header.biHeight = height;
+    info_header.biPlanes = 1;
+    info_header.biBitCount = 32;
+    info_header.biCompression = BI_RGB;
+    int ok = fwrite(&file_header, sizeof(file_header), 1, file) == 1 &&
+             fwrite(&info_header, sizeof(info_header), 1, file) == 1;
+    for (int y = height - 1; ok && y >= 0; --y)
+        ok = fwrite(top_down_bgra + (size_t)y * row_bytes, row_bytes, 1, file) == 1;
+    fclose(file);
+    return ok;
+}
+
+static unsigned char clamp_byte(int value)
+{
+    return (unsigned char)(value < 0 ? 0 : value > 255 ? 255 : value);
+}
+
+static DWORD WINAPI stereo_diagnostic_worker(void *unused)
+{
+    (void)unused;
+    StereoDiagnosticBitmap left = {0}, right = {0};
+    if (!load_stereo_diagnostic_bitmap(
+            g_geometry_final_interface_proof_path[0], &left) ||
+        !load_stereo_diagnostic_bitmap(
+            g_geometry_final_interface_proof_path[1], &right) ||
+        left.width != right.width || left.height != right.height) {
+        free_stereo_diagnostic_bitmap(&left);
+        free_stereo_diagnostic_bitmap(&right);
+        xr_log("Stereo diagnostic generation failed: final eye BMPs unavailable or mismatched");
+        InterlockedExchange(&g_stereo_diagnostic_started, 0);
+        return 0;
+    }
+    int width = left.width, height = left.height;
+    size_t eye_bytes = (size_t)width * (size_t)height * 4u;
+    size_t pair_bytes = eye_bytes * 2u;
+    unsigned char *side = (unsigned char *)calloc(1, pair_bytes);
+    unsigned char *overlay = (unsigned char *)calloc(1, eye_bytes);
+    unsigned char *anaglyph = (unsigned char *)calloc(1, eye_bytes);
+    unsigned char *difference = (unsigned char *)calloc(1, eye_bytes);
+    unsigned char *lens = (unsigned char *)calloc(1, pair_bytes);
+    if (!side || !overlay || !anaglyph || !difference || !lens) {
+        free(side); free(overlay); free(anaglyph); free(difference); free(lens);
+        free_stereo_diagnostic_bitmap(&left);
+        free_stereo_diagnostic_bitmap(&right);
+        xr_log("Stereo diagnostic generation failed: out of memory");
+        InterlockedExchange(&g_stereo_diagnostic_started, 0);
+        return 0;
+    }
+    unsigned long long total_difference = 0, equal_pixels = 0;
+    unsigned int maximum_difference = 0;
+    for (int y = 0; y < height; ++y) {
+        unsigned char *side_row = side + (size_t)y * (size_t)width * 8u;
+        memcpy(side_row, left.bgra + (size_t)y * (size_t)width * 4u,
+               (size_t)width * 4u);
+        memcpy(side_row + (size_t)width * 4u,
+               right.bgra + (size_t)y * (size_t)width * 4u,
+               (size_t)width * 4u);
+    }
+    for (size_t pixel = 0; pixel < (size_t)width * (size_t)height; ++pixel) {
+        size_t at = pixel * 4u;
+        int sum = 0;
+        for (int channel = 0; channel < 3; ++channel) {
+            int a = left.bgra[at + channel], b = right.bgra[at + channel];
+            int delta = abs(a - b);
+            sum += delta;
+            overlay[at + channel] = (unsigned char)((a + b + 1) / 2);
+            difference[at + channel] = clamp_byte(delta * 4);
+        }
+        overlay[at + 3] = anaglyph[at + 3] = difference[at + 3] = 255;
+        anaglyph[at + 2] = left.bgra[at + 2];
+        anaglyph[at + 1] = right.bgra[at + 1];
+        anaglyph[at] = right.bgra[at];
+        total_difference += (unsigned long long)sum;
+        if ((unsigned int)sum > maximum_difference) maximum_difference = (unsigned int)sum;
+        if (sum <= 3) ++equal_pixels;
+    }
+    /* This radial preview is deliberately diagnostic, not a Quest optical
+       calibration. OpenXR does not expose Meta's private lens coefficients. */
+    for (int eye = 0; eye < 2; ++eye) {
+        const unsigned char *source = eye ? right.bgra : left.bgra;
+        for (int y = 0; y < height; ++y) {
+            float ny = ((float)y + 0.5f) * 2.0f / (float)height - 1.0f;
+            for (int x = 0; x < width; ++x) {
+                float nx = ((float)x + 0.5f) * 2.0f / (float)width - 1.0f;
+                float radius2 = nx * nx + ny * ny;
+                size_t target = ((size_t)y * (size_t)width * 2u +
+                                 (size_t)eye * (size_t)width + (size_t)x) * 4u;
+                if (radius2 > 1.0f) { lens[target + 3] = 255; continue; }
+                float scale = 1.0f + 0.20f * radius2;
+                int sx = (int)(((nx * scale + 1.0f) * 0.5f) * (float)width);
+                int sy = (int)(((ny * scale + 1.0f) * 0.5f) * (float)height);
+                if (sx < 0 || sx >= width || sy < 0 || sy >= height) {
+                    lens[target + 3] = 255;
+                    continue;
+                }
+                memcpy(lens + target,
+                       source + ((size_t)sy * (size_t)width + (size_t)sx) * 4u, 4u);
+                lens[target + 3] = 255;
+            }
+        }
+    }
+    int wrote = write_stereo_diagnostic_bitmap(g_stereo_diagnostic_path[0],
+                                                width * 2, height, side) &&
+                write_stereo_diagnostic_bitmap(g_stereo_diagnostic_path[1],
+                                                width, height, overlay) &&
+                write_stereo_diagnostic_bitmap(g_stereo_diagnostic_path[2],
+                                                width, height, anaglyph) &&
+                write_stereo_diagnostic_bitmap(g_stereo_diagnostic_path[3],
+                                                width, height, difference) &&
+                write_stereo_diagnostic_bitmap(g_stereo_diagnostic_path[4],
+                                                width * 2, height, lens);
+    FILE *report = fopen(g_stereo_diagnostic_report_path, "wb");
+    if (report) {
+        double pixels = (double)width * (double)height;
+        fprintf(report,
+            "source=final OpenXR projection textures before physical headset compositor\n"
+            "dimensions_per_eye=%dx%d\n"
+            "mean_absolute_rgb_difference=%.3f\n"
+            "nearly_equal_pixels_percent=%.3f\n"
+            "maximum_rgb_difference_sum=%u\n"
+            "interface_rect=%d,%d %dx%d\n"
+            "interface_present_left=%d,%d %dx%d\n"
+            "interface_present_right=%d,%d %dx%d\n"
+            "lens_preview=approximate radial visualization only; not Quest optical calibration\n"
+            "interpretation=world differences are expected from stereo; head-locked UI edges should overlap in overlay/anaglyph\n",
+            width, height, total_difference / (pixels * 3.0),
+            equal_pixels * 100.0 / pixels, maximum_difference,
+            g_interface_content_x, g_interface_content_y,
+            g_interface_content_width, g_interface_content_height,
+            g_interface_present_rect[0][0], g_interface_present_rect[0][1],
+            g_interface_present_rect[0][2], g_interface_present_rect[0][3],
+            g_interface_present_rect[1][0], g_interface_present_rect[1][1],
+            g_interface_present_rect[1][2], g_interface_present_rect[1][3]);
+        fclose(report);
+    }
+    free(side); free(overlay); free(anaglyph); free(difference); free(lens);
+    free_stereo_diagnostic_bitmap(&left);
+    free_stereo_diagnostic_bitmap(&right);
+    xr_log(wrote ? "Generated Shift+1 stereo diagnostic image set"
+                 : "Stereo diagnostic generation failed while writing images");
+    InterlockedExchange(&g_stereo_diagnostic_started, wrote ? 2 : 0);
+    return wrote ? 0 : 1;
+}
+
+static void start_stereo_diagnostic_if_ready(void)
+{
+    if (!g_geometry_final_interface_proof_written[0] ||
+        !g_geometry_final_interface_proof_written[1] ||
+        InterlockedCompareExchange(&g_stereo_diagnostic_started, 1, 0) != 0)
+        return;
+    HANDLE worker = CreateThread(NULL, 0, stereo_diagnostic_worker, NULL, 0, NULL);
+    if (worker) CloseHandle(worker);
+    else {
+        InterlockedExchange(&g_stereo_diagnostic_started, 0);
+        xr_log("Stereo diagnostic generation failed: worker could not start");
+    }
+}
+
 void openxr_bridge_set_interface_load(int draw_calls, long long vertices)
 {
+    /* The launcher can arm a proof without invoking the in-process Shift+1
+       handler. Reset completed flags whenever no marker is present so the
+       next external marker cannot accidentally reuse the preceding set. */
+    if (g_geometry_proof_marker[0] &&
+        GetFileAttributesA(g_geometry_proof_marker) == INVALID_FILE_ATTRIBUTES) {
+        for (int eye = 0; eye < EYE_COUNT; ++eye) {
+            InterlockedExchange((volatile LONG *)&g_geometry_proof_written[eye], 0);
+            InterlockedExchange((volatile LONG *)&g_geometry_presented_proof_written[eye], 0);
+            InterlockedExchange((volatile LONG *)&g_geometry_final_interface_proof_written[eye], 0);
+            InterlockedExchange((volatile LONG *)&g_geometry_hud_base_proof_written[eye], 0);
+        }
+        InterlockedExchange((volatile LONG *)&g_interface_alpha_proof_written, 0);
+        InterlockedExchange((volatile LONG *)&g_interface_alpha_mask_proof_written, 0);
+        InterlockedCompareExchange(&g_stereo_diagnostic_started, 0, 2);
+    }
     g_interface_draw_calls = draw_calls;
     g_interface_vertices = vertices;
     int previous = g_interface_heavy;
-    if (draw_calls >= 250) {
+    int gameplay_active =
+        InterlockedCompareExchange(&g_geometry_active, 0, 0) != 0;
+    /* Escape/Tab calls this once from the gameplay hook with a zero vertex
+       count, before the appended interface begins. Keep that path immediate.
+       In ordinary gameplay the native 2560x1441 HUD now measures roughly
+       280-420 draws, with short combat spikes above 800. The old 250-draw
+       cutoff consequently treated every gameplay frame as a full menu and
+       blended its dark backdrop over both eyes. Non-keyboard overlays such as
+       level-up/results persist, so require a short sustained high-load run
+       while geometry is active instead of reacting to one combat frame. */
+    /* The proxy uses a negative vertex count as an unambiguous Escape/Tab
+       sentinel. Draw-count-only detection confused dense combat frames with
+       menus, while the old zero-vertex convention was lost when the same
+       frame's authored UI vertices were forwarded. Very dense persistent
+       interfaces (results/level-up) still enter quickly without relying on a
+       keyboard key. */
+    int explicit_interface = vertices < 0;
+    int enter_threshold = gameplay_active ? 700 : 250;
+    int leave_threshold = gameplay_active ? 575 : 235;
+    int enter_frames = gameplay_active ? (draw_calls >= 1000 ? 2 : 6) : 1;
+    if (explicit_interface) {
         g_interface_heavy = 1;
         g_interface_light_frames = 0;
-    } else if (draw_calls <= 235) {
-        /* Gameplay legitimately crosses 250 draws for a frame during combat.
-           Requiring <=180 to leave menu mode made one such spike latch the
-           compositor indefinitely. Explicit Escape/Tab state remains forced
-           heavy by the window hook. */
+        g_interface_heavy_candidate_frames = 0;
+    } else if (draw_calls >= enter_threshold) {
+        g_interface_light_frames = 0;
+        if (++g_interface_heavy_candidate_frames >= enter_frames) {
+            g_interface_heavy = 1;
+            g_interface_heavy_candidate_frames = 0;
+        }
+    } else if (draw_calls <= leave_threshold) {
+        g_interface_heavy_candidate_frames = 0;
         if (++g_interface_light_frames >= 4) g_interface_heavy = 0;
     } else {
+        g_interface_heavy_candidate_frames = 0;
         g_interface_light_frames = 0;
     }
     if (!previous && g_interface_heavy) {
@@ -2685,6 +3067,16 @@ int openxr_bridge_interface_heavy(void)
 
 void openxr_bridge_request_fresh_geometry_proof(void)
 {
+    if (InterlockedCompareExchange(&g_stereo_diagnostic_started, 0, 0) == 1) {
+        xr_log("Shift+1 capture ignored while the previous diagnostic set is writing");
+        return;
+    }
+    InterlockedExchange(&g_stereo_diagnostic_started, 0);
+    for (int output = 0; output < 5; ++output)
+        if (g_stereo_diagnostic_path[output][0])
+            DeleteFileA(g_stereo_diagnostic_path[output]);
+    if (g_stereo_diagnostic_report_path[0])
+        DeleteFileA(g_stereo_diagnostic_report_path);
     for (int eye = 0; eye < EYE_COUNT; ++eye) {
         InterlockedExchange((volatile LONG *)&g_geometry_proof_written[eye], 0);
         InterlockedExchange(
@@ -2710,6 +3102,14 @@ void openxr_bridge_request_fresh_geometry_proof(void)
         DeleteFileA(g_interface_alpha_proof_path);
     if (g_interface_alpha_mask_proof_path[0])
         DeleteFileA(g_interface_alpha_mask_proof_path);
+    /* Shift+1 must arm its own texture proofs, even with no observer script. */
+    if (g_geometry_proof_marker[0]) {
+        FILE *marker = fopen(g_geometry_proof_marker, "wb");
+        if (marker) {
+            fputs("fresh two-eye proof\n", marker);
+            fclose(marker);
+        }
+    }
     xr_log("Fresh two-eye proof set armed for Shift+1");
 }
 
@@ -3486,6 +3886,8 @@ int openxr_bridge_capture_native_mirror(int preserve_desktop)
     if (!g_gl_interop_ready || !p_glBindTextureRaw || !p_glTexImage2DRaw ||
         !p_glTexParameteriRaw) return 0;
     GLint previous_read = 0, previous_draw = 0, viewport[4] = {0};
+    GLint previous_texture = 0;
+    p_glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_texture);
     p_glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read);
     p_glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previous_draw);
     p_glGetIntegerv(GL_VIEWPORT, viewport);
@@ -3544,6 +3946,7 @@ int openxr_bridge_capture_native_mirror(int preserve_desktop)
     }
     p_glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)previous_read);
     p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)previous_draw);
+    p_glBindTextureRaw(GL_TEXTURE_2D, (GLuint)previous_texture);
     return status == GL_FRAMEBUFFER_COMPLETE;
 }
 
@@ -3553,7 +3956,21 @@ int openxr_bridge_set_geometry_active(int active)
     /* In-round interfaces no longer disable the projection. Their authored
        pixels are submitted in a separate transparent OpenXR layer. */
     int value = active && !g_flat_scene_mode ? 1 : 0;
-    InterlockedExchange(&g_geometry_active, value);
+    LONG previous = InterlockedExchange(&g_geometry_active, value);
+    if (previous && !value) {
+        /* A completed round/menu is one monoscopic panel, exactly like the
+           startup screen. Keeping two identical captures in a projection
+           layer applies different eye poses/FOVs to the same pixels and is
+           perceived as crossed double vision. Clear every stereo-only bit at
+           the handoff; capture_flat_frame will publish the new panel. */
+        g_eye_used_depth_stereo[0] = 0;
+        g_eye_used_depth_stereo[1] = 0;
+        g_projection_anchor_valid = 0;
+        g_menu_overlay_ready = 0;
+        g_menu_overlay_exact_alpha = 0;
+        g_interface_alpha_desktop_ready = 0;
+        xr_log("Gameplay-to-menu handoff: cleared stereo projection and stale UI state");
+    }
     if (g_geometry_activity_logged != value) {
         xr_log(value ? "Presentation source: live stereo gameplay"
                      : "Presentation source: startup flat panel");
@@ -3582,12 +3999,18 @@ int openxr_bridge_capture_flat_frame(void)
     g_flat_capture_tick = now;
     if (!TryAcquireSRWLockExclusive(&g_interop_capture_lock)) return 0;
 
-    if (!g_flat_scene_mode && g_native_mirror_ready &&
+    if (!g_flat_scene_mode &&
+        InterlockedCompareExchange(&g_geometry_active, 0, 0) &&
+        g_native_mirror_ready &&
         g_menu_interop_objects[0] && g_menu_interop_objects[1]) {
         /* Pause, Tab and level-up interfaces are appended after the true-eye
            renderer returns. Capture both the completed desktop frame and the
            same-frame renderer baseline. A D3D shader can then transfer only
-           their difference onto each genuine stereo eye. */
+           their difference onto each genuine stereo eye. When the world hook
+           has stopped (for example, between server rounds), bypass this path
+           and publish the complete backbuffer below; otherwise the headset
+           retains the last gameplay pair while the desktop receives only an
+           incomplete transition layer. */
         HANDLE menu_objects[2] = {
             g_menu_interop_objects[0], g_menu_interop_objects[1]
         };
@@ -3758,9 +4181,10 @@ static int copy_game_frame_to_swapchain(uint32_t eye, ID3D11Texture2D *destinati
         ID3D11DeviceContext_CopyResource(
             g_context, (ID3D11Resource *)destination,
             (ID3D11Resource *)source);
-        /* A menu transition that has not produced a stable panel yet should
-           remain a retained stereo world, never fall back to a one-eye quad. */
-        g_eye_used_depth_stereo[eye] = g_flat_scene_mode ? 0 : 1;
+        /* Geometry has stopped, so this is an actual menu/results transition,
+           not an in-round overlay. Both interop eyes contain the same authored
+           backbuffer and must be presented once as a monoscopic quad. */
+        g_eye_used_depth_stereo[eye] = 0;
         draw_vr_cursor(destination, g_eyes[eye].width, g_eyes[eye].height, NULL);
         /* Do not consume a menu proof request during the short transition
            before its complete/baseline textures are ready. Flat startup mode
@@ -4133,6 +4557,19 @@ static int initialize_bridge(const char *base_directory)
     snprintf(g_interface_alpha_mask_proof_path,
              sizeof(g_interface_alpha_mask_proof_path),
              "%s\\SkillshotCityVR-interface-alpha-mask.bmp", base_directory);
+    snprintf(g_stereo_diagnostic_path[0], sizeof(g_stereo_diagnostic_path[0]),
+             "%s\\SkillshotCityVR-stereo-side-by-side.bmp", base_directory);
+    snprintf(g_stereo_diagnostic_path[1], sizeof(g_stereo_diagnostic_path[1]),
+             "%s\\SkillshotCityVR-stereo-overlay.bmp", base_directory);
+    snprintf(g_stereo_diagnostic_path[2], sizeof(g_stereo_diagnostic_path[2]),
+             "%s\\SkillshotCityVR-stereo-anaglyph.bmp", base_directory);
+    snprintf(g_stereo_diagnostic_path[3], sizeof(g_stereo_diagnostic_path[3]),
+             "%s\\SkillshotCityVR-stereo-difference.bmp", base_directory);
+    snprintf(g_stereo_diagnostic_path[4], sizeof(g_stereo_diagnostic_path[4]),
+             "%s\\SkillshotCityVR-stereo-lens-approximation.bmp", base_directory);
+    snprintf(g_stereo_diagnostic_report_path,
+             sizeof(g_stereo_diagnostic_report_path),
+             "%s\\SkillshotCityVR-stereo-diagnostics.txt", base_directory);
     snprintf(g_tabletop_recenter_marker, sizeof(g_tabletop_recenter_marker),
              "%s\\SkillshotCityVR-tabletop-recenter.txt", base_directory);
     snprintf(g_pose_trace_marker, sizeof(g_pose_trace_marker),
@@ -4279,12 +4716,16 @@ static void poll_events(void)
                 XrResult result = p_xrBeginSession(g_session, &begin);
                 if (XR_SUCCEEDED(result)) {
                     g_running = 1;
+                    g_session_stopped_tick = 0;
+                    g_session_stall_logged = 0;
                     snprintf(g_status, sizeof(g_status), "running stereo (%lu frames)", g_submitted_frames);
                     xr_log("Stereo session began");
                 } else fail("xrBeginSession", result);
             } else if (g_session_state == XR_SESSION_STATE_STOPPING && g_running) {
                 p_xrEndSession(g_session);
                 g_running = 0;
+                g_session_stopped_tick = GetTickCount64();
+                g_session_stall_logged = 0;
                 xr_log("Stereo session stopped");
             }
         }
@@ -4450,14 +4891,11 @@ static int submit_diagnostic_frame(void)
             if (copied_eye && g_interface_heavy && g_menu_overlay_ready &&
                 g_menu_overlay_exact_alpha) {
                 AcquireSRWLockExclusive(&g_interop_capture_lock);
+                XrRect2Di interface_rect;
                 if (render_menu_overlay_layer(
                         target, swapchain->images[image_index].texture,
-                        swapchain->width, swapchain->height, 1)) {
-                    XrRect2Di interface_rect;
-                    interface_rect.offset.x = g_interface_content_x;
-                    interface_rect.offset.y = g_interface_content_y;
-                    interface_rect.extent.width = g_interface_content_width;
-                    interface_rect.extent.height = g_interface_content_height;
+                        swapchain->width, swapchain->height, (int)eye, 1,
+                        &interface_rect)) {
                     draw_vr_cursor(swapchain->images[image_index].texture,
                                    swapchain->width, swapchain->height,
                                    &interface_rect);
@@ -4468,6 +4906,7 @@ static int submit_diagnostic_frame(void)
                         &g_geometry_final_interface_proof_written[eye],
                         eye == 0 ? "final interface-composited left eye"
                                  : "final interface-composited right eye");
+                    start_stereo_diagnostic_if_ready();
                 }
                 ReleaseSRWLockExclusive(&g_interop_capture_lock);
             }
@@ -4761,7 +5200,11 @@ static DWORD WINAPI openxr_frame_thread(void *unused)
 {
     (void)unused;
     HANDLE thread = GetCurrentThread();
-    int priority_result = SetThreadPriority(thread, THREAD_PRIORITY_HIGHEST);
+    /* MMCSS already protects the compositor cadence. ABOVE_NORMAL leaves
+       Meta's USB/encoder and tracking workers enough scheduling headroom; the
+       previous HIGHEST+MMCSS combination could monopolize a busy core while
+       Link was recovering from a transport hiccup. */
+    int priority_result = SetThreadPriority(thread, THREAD_PRIORITY_ABOVE_NORMAL);
     typedef HANDLE (WINAPI *PFNAVSETMMTHREADCHARACTERISTICSA)(LPCSTR, LPDWORD);
     typedef BOOL (WINAPI *PFNAVREVERTMMTHREADCHARACTERISTICS)(HANDLE);
     HMODULE avrt = LoadLibraryA("avrt.dll");
@@ -4774,12 +5217,21 @@ static DWORD WINAPI openxr_frame_thread(void *unused)
     DWORD task_index = 0;
     HANDLE mmcss = set_mmcss ? set_mmcss("Games", &task_index) : NULL;
     xr_log("Dedicated OpenXR frame thread active; priority=%s MMCSS=%s",
-           priority_result ? "high" : "unchanged", mmcss ? "Games" : "unavailable");
-    while (!g_failed) {
+            priority_result ? "above-normal" : "unchanged",
+            mmcss ? "Games" : "unavailable");
+    while (!g_failed &&
+           !InterlockedCompareExchange(&g_shutdown_requested, 0, 0)) {
         poll_events();
         if (g_running) {
             if (!submit_diagnostic_frame()) break;
         } else {
+            if (g_session_stopped_tick && !g_session_stall_logged &&
+                GetTickCount64() - g_session_stopped_tick >= 5000) {
+                xr_log("OpenXR runtime has not returned READY five seconds after STOPPING; "
+                       "game rendering remains active but Link transport/compositor recovery "
+                       "is required");
+                g_session_stall_logged = 1;
+            }
             Sleep(2);
         }
     }
@@ -4790,6 +5242,7 @@ static DWORD WINAPI openxr_frame_thread(void *unused)
 
 int openxr_bridge_tick(const char *base_directory, void *device_context)
 {
+    if (InterlockedCompareExchange(&g_shutdown_requested, 0, 0)) return 0;
     if (device_context) g_game_window = WindowFromDC((HDC)device_context);
     if (g_failed) return 0;
     if (!g_enabled) {
@@ -4830,6 +5283,197 @@ int openxr_bridge_tick(const char *base_directory, void *device_context)
     if (g_running) return submit_diagnostic_frame();
     return 1;
 }
+
+#define RELEASE_D3D(object) do { \
+    if ((object) != NULL) { \
+        IUnknown_Release((IUnknown *)(object)); \
+        (object) = NULL; \
+    } \
+} while (0)
+
+static void release_interop_registration(HANDLE *object)
+{
+    if (*object && g_interop_device && p_wglDXUnregisterObjectNV)
+        p_wglDXUnregisterObjectNV(g_interop_device, *object);
+    *object = NULL;
+}
+
+int openxr_bridge_shutdown(void)
+{
+    if (InterlockedCompareExchange(&g_shutdown_complete, 0, 0)) return 1;
+    if (InterlockedCompareExchange(&g_shutdown_started, 1, 0) != 0) {
+        for (int spin = 0; spin < 100; ++spin) {
+            if (InterlockedCompareExchange(&g_shutdown_complete, 0, 0)) return 1;
+            Sleep(1);
+        }
+        return 0;
+    }
+
+    xr_log("OpenXR shutdown requested");
+    InterlockedExchange(&g_shutdown_requested, 1);
+    if (g_frame_thread) {
+        DWORD worker_id = GetThreadId(g_frame_thread);
+        if (worker_id != GetCurrentThreadId()) {
+            DWORD wait = WaitForSingleObject(g_frame_thread, 2000);
+            if (wait != WAIT_OBJECT_0) {
+                xr_log("ERROR OpenXR frame worker did not stop within 2000 ms; "
+                       "leaving runtime-owned resources intact to avoid a race");
+                snprintf(g_status, sizeof(g_status), "shutdown timed out");
+                InterlockedExchange(&g_shutdown_started, 0);
+                return 0;
+            }
+        }
+        CloseHandle(g_frame_thread);
+        g_frame_thread = NULL;
+        InterlockedExchange(&g_frame_thread_started, 0);
+    }
+
+    if (g_pose_trace_file) {
+        fflush(g_pose_trace_file);
+        fclose(g_pose_trace_file);
+        g_pose_trace_file = NULL;
+    }
+
+    /* Ask a running runtime to enter STOPPING, then service its state events
+       ourselves now that the frame worker is joined. This bounded wait keeps
+       context destruction responsive even when Link has already failed. */
+    if (g_session != XR_NULL_HANDLE && g_running && p_xrRequestExitSession) {
+        XrResult request = p_xrRequestExitSession(g_session);
+        xr_log("xrRequestExitSession during shutdown: %d", (int)request);
+        ULONGLONG deadline = GetTickCount64() + 500;
+        while (g_running && GetTickCount64() < deadline) {
+            poll_events();
+            if (g_running) Sleep(2);
+        }
+    }
+
+    /* The WGL/D3D registrations must be released while the game's GL context
+       is still current. The proxy invokes this function from wglDeleteContext
+       before forwarding the real deletion. */
+    AcquireSRWLockExclusive(&g_interop_capture_lock);
+    for (int eye = 0; eye < EYE_COUNT; ++eye) {
+        release_interop_registration(&g_interop_objects[eye]);
+        release_interop_registration(&g_hud_base_interop_objects[eye]);
+    }
+    for (int frame = 0; frame < 2; ++frame)
+        release_interop_registration(&g_menu_interop_objects[frame]);
+    for (int resource = 0; resource < 2; ++resource)
+        release_interop_registration(&g_world_interop_objects[resource]);
+    if (g_interop_device && p_wglDXCloseDeviceNV)
+        p_wglDXCloseDeviceNV(g_interop_device);
+    g_interop_device = NULL;
+    g_gl_interop_ready = 0;
+    ReleaseSRWLockExclusive(&g_interop_capture_lock);
+
+    for (int eye = 0; eye < EYE_COUNT; ++eye) {
+        for (uint32_t image = 0; image < g_eyes[eye].image_count; ++image)
+            RELEASE_D3D(g_eyes[eye].targets[image]);
+        for (uint32_t image = 0; image < g_depth_eyes[eye].image_count; ++image)
+            RELEASE_D3D(g_depth_eyes[eye].targets[image]);
+    }
+    for (uint32_t image = 0; image < g_interface_layer.image_count; ++image)
+        RELEASE_D3D(g_interface_layer.targets[image]);
+
+    if (p_xrDestroySwapchain) {
+        for (int eye = 0; eye < EYE_COUNT; ++eye) {
+            if (g_depth_eyes[eye].handle != XR_NULL_HANDLE) {
+                p_xrDestroySwapchain(g_depth_eyes[eye].handle);
+                g_depth_eyes[eye].handle = XR_NULL_HANDLE;
+            }
+            if (g_eyes[eye].handle != XR_NULL_HANDLE) {
+                p_xrDestroySwapchain(g_eyes[eye].handle);
+                g_eyes[eye].handle = XR_NULL_HANDLE;
+            }
+        }
+        if (g_interface_layer.handle != XR_NULL_HANDLE) {
+            p_xrDestroySwapchain(g_interface_layer.handle);
+            g_interface_layer.handle = XR_NULL_HANDLE;
+        }
+    }
+    if (g_view_space != XR_NULL_HANDLE && p_xrDestroySpace) {
+        p_xrDestroySpace(g_view_space);
+        g_view_space = XR_NULL_HANDLE;
+    }
+    if (g_space != XR_NULL_HANDLE && p_xrDestroySpace) {
+        p_xrDestroySpace(g_space);
+        g_space = XR_NULL_HANDLE;
+    }
+    if (g_session != XR_NULL_HANDLE && p_xrDestroySession) {
+        XrResult destroyed = p_xrDestroySession(g_session);
+        xr_log("xrDestroySession during shutdown: %d", (int)destroyed);
+        g_session = XR_NULL_HANDLE;
+    }
+    g_running = 0;
+    if (g_instance != XR_NULL_HANDLE && p_xrDestroyInstance) {
+        XrResult destroyed = p_xrDestroyInstance(g_instance);
+        xr_log("xrDestroyInstance during shutdown: %d", (int)destroyed);
+        g_instance = XR_NULL_HANDLE;
+    }
+
+    for (int eye = 0; eye < EYE_COUNT; ++eye) {
+        RELEASE_D3D(g_interop_views[eye]);
+        RELEASE_D3D(g_interop_textures[eye]);
+        RELEASE_D3D(g_hud_base_interop_views[eye]);
+        RELEASE_D3D(g_hud_base_interop_textures[eye]);
+        RELEASE_D3D(g_geometry_eye_depth_views[eye]);
+        RELEASE_D3D(g_geometry_eye_depth_textures[eye]);
+        for (int pair = 0; pair < PAIR_BUFFER_COUNT; ++pair) {
+            RELEASE_D3D(g_present_pair_views[pair][eye]);
+            RELEASE_D3D(g_present_pair_targets[pair][eye]);
+            RELEASE_D3D(g_present_pair_textures[pair][eye]);
+            RELEASE_D3D(g_present_pair_depth_views[pair][eye]);
+            RELEASE_D3D(g_present_pair_depth_textures[pair][eye]);
+        }
+    }
+    for (int frame = 0; frame < 2; ++frame) {
+        RELEASE_D3D(g_menu_interop_views[frame]);
+        RELEASE_D3D(g_menu_interop_textures[frame]);
+    }
+    RELEASE_D3D(g_world_color_view);
+    RELEASE_D3D(g_world_depth_view);
+    RELEASE_D3D(g_world_color_texture);
+    RELEASE_D3D(g_world_depth_texture);
+    RELEASE_D3D(g_world_depth_shader_texture);
+    RELEASE_D3D(g_stereo_vertex_shader);
+    RELEASE_D3D(g_stereo_pixel_shader);
+    RELEASE_D3D(g_stereo_constants);
+    RELEASE_D3D(g_stereo_sampler);
+    RELEASE_D3D(g_stereo_rasterizer);
+    RELEASE_D3D(g_pair_sharpen_vertex_shader);
+    RELEASE_D3D(g_pair_sharpen_pixel_shader);
+    RELEASE_D3D(g_menu_overlay_pixel_shader);
+    RELEASE_D3D(g_menu_overlay_blend);
+    RELEASE_D3D(g_pair_sharpen_constants);
+    RELEASE_D3D(g_pair_sharpen_sampler);
+    RELEASE_D3D(g_pair_sharpen_rasterizer);
+    RELEASE_D3D(g_depth_copy_vertex_shader);
+    RELEASE_D3D(g_depth_copy_pixel_shader);
+    RELEASE_D3D(g_depth_copy_constants);
+    RELEASE_D3D(g_depth_copy_state);
+    RELEASE_D3D(g_cursor_view);
+    RELEASE_D3D(g_cursor_texture);
+    RELEASE_D3D(g_cursor_vertex_shader);
+    RELEASE_D3D(g_cursor_pixel_shader);
+    RELEASE_D3D(g_cursor_constants);
+    RELEASE_D3D(g_cursor_sampler);
+    RELEASE_D3D(g_cursor_blend);
+    RELEASE_D3D(g_cursor_rasterizer);
+    RELEASE_D3D(g_pair_copy_fence);
+    RELEASE_D3D(g_d3d_multithread);
+    RELEASE_D3D(g_context);
+    RELEASE_D3D(g_device);
+
+    if (g_loader) {
+        FreeLibrary(g_loader);
+        g_loader = NULL;
+    }
+    snprintf(g_status, sizeof(g_status), "stopped cleanly");
+    xr_log("OpenXR shutdown complete");
+    InterlockedExchange(&g_shutdown_complete, 1);
+    return 1;
+}
+
+#undef RELEASE_D3D
 
 const char *openxr_bridge_status(void)
 {

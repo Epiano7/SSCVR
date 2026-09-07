@@ -55,7 +55,7 @@ EXPORTS
     glColor4uiv=opengl32_system.glColor4uiv @53
     glColor4us=opengl32_system.glColor4us @54
     glColor4usv=opengl32_system.glColor4usv @55
-    glColorMask=opengl32_system.glColorMask @56
+    glColorMask @56
     glColorMaterial=opengl32_system.glColorMaterial @57
     glColorPointer=opengl32_system.glColorPointer @58
     glCopyPixels=opengl32_system.glCopyPixels @59
@@ -347,7 +347,7 @@ EXPORTS
     wglCopyContext=opengl32_system.wglCopyContext @345
     wglCreateContext=opengl32_system.wglCreateContext @346
     wglCreateLayerContext=opengl32_system.wglCreateLayerContext @347
-    wglDeleteContext=opengl32_system.wglDeleteContext @348
+    wglDeleteContext @348
     wglDescribeLayerPlane=opengl32_system.wglDescribeLayerPlane @349
     wglDescribePixelFormat=opengl32_system.wglDescribePixelFormat @350
     wglGetCurrentContext=opengl32_system.wglGetCurrentContext @351

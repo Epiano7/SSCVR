@@ -38,6 +38,40 @@ static inline double vr_hud_scale_y_for_eye(double scale_x, double eye_width,
     return scale_x * (eye_width / eye_height) / canvas_aspect;
 }
 
+/* Place a head-locked canvas around an eye's optical centre.  Both eyes use
+   the same dimensions while their X origins follow the runtime's asymmetric
+   FOV centres, matching the fixed gameplay HUD without introducing stereo
+   disparity. */
+static inline int vr_safe_canvas_rect_for_eye(int eye_width, int eye_height,
+                                               double optical_center_x,
+                                               double scale_x, double scale_y,
+                                               int rectangle[4])
+{
+    if (!rectangle || eye_width <= 0 || eye_height <= 0 ||
+        !isfinite(optical_center_x) || !isfinite(scale_x) ||
+        !isfinite(scale_y) || scale_x <= 0.0 || scale_x > 1.0 ||
+        scale_y <= 0.0 || scale_y > 1.0)
+        return 0;
+    int width = (int)floor((double)eye_width * scale_x + 0.5);
+    int height = (int)floor((double)eye_height * scale_y + 0.5);
+    int x = (int)floor(((double)eye_width * optical_center_x -
+                        (double)width * 0.5) + 0.5);
+    int y = (eye_height - height) / 2;
+    if (width < 1) width = 1;
+    if (height < 1) height = 1;
+    if (width > eye_width) width = eye_width;
+    if (height > eye_height) height = eye_height;
+    if (x < 0) x = 0;
+    if (x > eye_width - width) x = eye_width - width;
+    if (y < 0) y = 0;
+    if (y > eye_height - height) y = eye_height - height;
+    rectangle[0] = x;
+    rectangle[1] = y;
+    rectangle[2] = width;
+    rectangle[3] = height;
+    return 1;
+}
+
 /* Match OpenXR's lens metadata to a calibrated horizontal texture shift so
    asynchronous timewarp does not bend straight geometry during head motion. */
 static inline void vr_shift_horizontal_fov_for_texture_f(float *angle_left,

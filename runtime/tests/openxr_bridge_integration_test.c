@@ -6,10 +6,22 @@
 #include <stdlib.h>
 
 #include "openxr_bridge.h"
+#include "geometry_math.h"
 
 static HGLRC (WINAPI *p_wglCreateContext)(HDC);
 static BOOL (WINAPI *p_wglMakeCurrent)(HDC, HGLRC);
 static BOOL (WINAPI *p_wglDeleteContext)(HGLRC);
+static PROC (WINAPI *p_wglGetProcAddress)(LPCSTR);
+static void (APIENTRY *p_glBindFramebuffer)(GLenum, GLuint);
+static void (APIENTRY *p_glScissor)(GLint, GLint, GLsizei, GLsizei);
+static GLboolean (APIENTRY *p_glIsEnabled)(GLenum);
+static void (APIENTRY *p_glGenTextures)(GLsizei, GLuint *);
+static void (APIENTRY *p_glBindTexture)(GLenum, GLuint);
+static void (APIENTRY *p_glTexParameteri)(GLenum, GLenum, GLint);
+static void (APIENTRY *p_glTexImage2D)(GLenum, GLint, GLint, GLsizei, GLsizei,
+                                     GLint, GLenum, GLenum, const void *);
+static void (APIENTRY *p_glTexCoord2f)(GLfloat, GLfloat);
+static GLuint replay_texture;
 static void (APIENTRY *p_glViewport)(GLint, GLint, GLsizei, GLsizei);
 static void (APIENTRY *p_glClearColor)(GLclampf, GLclampf, GLclampf, GLclampf);
 static void (APIENTRY *p_glClear)(GLbitfield);
@@ -22,6 +34,8 @@ static void (APIENTRY *p_glBegin)(GLenum);
 static void (APIENTRY *p_glColor3f)(GLfloat, GLfloat, GLfloat);
 static void (APIENTRY *p_glColor4f)(GLfloat, GLfloat, GLfloat, GLfloat);
 static void (APIENTRY *p_glBlendFunc)(GLenum, GLenum);
+static void (APIENTRY *p_glColorMask)(GLboolean, GLboolean, GLboolean, GLboolean);
+static void (APIENTRY *p_glGetIntegerv)(GLenum, GLint *);
 static void (APIENTRY *p_glVertex3f)(GLfloat, GLfloat, GLfloat);
 static void (APIENTRY *p_glVertex2f)(GLfloat, GLfloat);
 static void (APIENTRY *p_glEnd)(void);
@@ -44,10 +58,14 @@ static int load_system_gl(void)
     if (!p_##name) return 0; \
 } while (0)
     LOAD_GL(wglCreateContext); LOAD_GL(wglMakeCurrent); LOAD_GL(wglDeleteContext);
+    LOAD_GL(wglGetProcAddress); LOAD_GL(glScissor); LOAD_GL(glIsEnabled);
+    LOAD_GL(glGenTextures); LOAD_GL(glBindTexture); LOAD_GL(glTexParameteri);
+    LOAD_GL(glTexImage2D); LOAD_GL(glTexCoord2f);
     LOAD_GL(glViewport); LOAD_GL(glClearColor); LOAD_GL(glClear);
     LOAD_GL(glMatrixMode); LOAD_GL(glLoadIdentity); LOAD_GL(glFrustum);
     LOAD_GL(glTranslatef); LOAD_GL(glBegin); LOAD_GL(glColor3f);
     LOAD_GL(glColor4f); LOAD_GL(glBlendFunc);
+    LOAD_GL(glColorMask); LOAD_GL(glGetIntegerv);
     LOAD_GL(glVertex3f); LOAD_GL(glVertex2f); LOAD_GL(glEnd);
     LOAD_GL(glOrtho); LOAD_GL(glDisable); LOAD_GL(glEnable);
     LOAD_GL(glPolygonMode);
@@ -131,7 +149,56 @@ static void draw_world(int frame, int eye)
     p_glEnd();
 }
 
-static void draw_interface(void)
+static void draw_center_announcement_test(int eye)
+{
+    /* Reproduce SSC's ordinary center announcements: an authored translucent
+       bar is drawn after the pre-HUD world capture but before the completed
+       eye capture.  The deliberately different scenery patch under each eye
+       makes accidental source-eye gameplay transfer directly observable. */
+    p_glMatrixMode(GL_PROJECTION);
+    p_glLoadIdentity();
+    p_glOrtho(0.0, 960.0, 540.0, 0.0, -1.0, 1.0);
+    p_glMatrixMode(GL_MODELVIEW);
+    p_glLoadIdentity();
+    p_glDisable(GL_DEPTH_TEST);
+    p_glDisable(GL_TEXTURE_2D);
+    p_glDisable(GL_BLEND);
+    p_glColor3f(eye ? 0.72f : 0.08f, eye ? 0.08f : 0.58f,
+                eye ? 0.22f : 0.82f);
+    p_glBegin(GL_QUADS);
+    p_glVertex2f(250.0f, 210.0f); p_glVertex2f(710.0f, 210.0f);
+    p_glVertex2f(710.0f, 330.0f); p_glVertex2f(250.0f, 330.0f);
+    p_glEnd();
+}
+
+static void draw_center_announcement(void)
+{
+    p_glMatrixMode(GL_PROJECTION);
+    p_glLoadIdentity();
+    p_glOrtho(0.0, 960.0, 540.0, 0.0, -1.0, 1.0);
+    p_glMatrixMode(GL_MODELVIEW);
+    p_glLoadIdentity();
+    p_glDisable(GL_DEPTH_TEST);
+    p_glDisable(GL_TEXTURE_2D);
+    p_glEnable(GL_BLEND);
+    p_glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    p_glColor4f(0.035f, 0.055f, 0.085f, 0.72f);
+    p_glBegin(GL_QUADS);
+    p_glVertex2f(275.0f, 230.0f); p_glVertex2f(685.0f, 230.0f);
+    p_glVertex2f(685.0f, 310.0f); p_glVertex2f(275.0f, 310.0f);
+    p_glEnd();
+    /* Opaque blocks stand in for announcement text. They must align exactly,
+       while the translucent bar must retain each eye's own world beneath it. */
+    p_glColor4f(0.95f, 0.93f, 0.82f, 1.0f);
+    p_glBegin(GL_QUADS);
+    p_glVertex2f(405.0f, 258.0f); p_glVertex2f(555.0f, 258.0f);
+    p_glVertex2f(555.0f, 282.0f); p_glVertex2f(405.0f, 282.0f);
+    p_glEnd();
+    p_glDisable(GL_BLEND);
+    p_glEnable(GL_DEPTH_TEST);
+}
+
+static void draw_interface(int frame)
 {
     p_glMatrixMode(GL_PROJECTION);
     p_glLoadIdentity();
@@ -143,6 +210,25 @@ static void draw_interface(void)
     p_glDisable(GL_TEXTURE_2D);
     p_glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
     p_glEnable(GL_BLEND);
+    if (replay_texture) {
+        /* Local-only captured game UI is already premultiplied. Replay its
+           exact RGB and separately captured coverage, without game assets in
+           the source tree or a live game/matchmaking session. */
+        p_glEnable(GL_TEXTURE_2D);
+        p_glBindTexture(GL_TEXTURE_2D, replay_texture);
+        p_glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        p_glColor4f(1, 1, 1, 1);
+        p_glBegin(GL_QUADS);
+        p_glTexCoord2f(0, 0); p_glVertex2f(0, 0);
+        p_glTexCoord2f(1, 0); p_glVertex2f(960, 0);
+        p_glTexCoord2f(1, 1); p_glVertex2f(960, 540);
+        p_glTexCoord2f(0, 1); p_glVertex2f(0, 540);
+        p_glEnd();
+        p_glDisable(GL_TEXTURE_2D);
+        p_glDisable(GL_BLEND);
+        p_glEnable(GL_DEPTH_TEST);
+        return;
+    }
     /* A translucent panel plus an opaque control exercises accumulated alpha
        and overlapping UI, while the untouched background must remain exactly
        transparent. */
@@ -151,13 +237,164 @@ static void draw_interface(void)
     p_glVertex2f(250.0f, 145.0f); p_glVertex2f(710.0f, 145.0f);
     p_glVertex2f(710.0f, 395.0f); p_glVertex2f(250.0f, 395.0f);
     p_glEnd();
-    p_glColor4f(0.92f, 0.16f, 0.12f, 1.0f);
+    int second = frame >= 1400;
+    if (second) p_glColor4f(0.12f, 0.84f, 0.24f, 1.0f);
+    else p_glColor4f(0.92f, 0.16f, 0.12f, 1.0f);
     p_glBegin(GL_QUADS);
     p_glVertex2f(400.0f, 235.0f); p_glVertex2f(560.0f, 235.0f);
     p_glVertex2f(560.0f, 305.0f); p_glVertex2f(400.0f, 305.0f);
     p_glEnd();
+    /* An opaque marker near an authored edge detects clipped/scaled menus. */
+    p_glColor4f(0.85f, 0.65f, 0.10f, 1.0f);
+    p_glBegin(GL_QUADS);
+    p_glVertex2f(24, 24); p_glVertex2f(64, 24);
+    p_glVertex2f(64, 64); p_glVertex2f(24, 64);
+    p_glEnd();
     p_glDisable(GL_BLEND);
     p_glEnable(GL_DEPTH_TEST);
+}
+
+static unsigned char *read_proof_pixels(const char *path, int *width, int *height)
+{
+    FILE *file = fopen(path, "rb");
+    BITMAPFILEHEADER header;
+    BITMAPINFOHEADER info;
+    if (!file) return NULL;
+    if (fread(&header, sizeof(header), 1, file) != 1 ||
+        fread(&info, sizeof(info), 1, file) != 1 ||
+        header.bfType != 0x4D42 || info.biSize != sizeof(info) ||
+        info.biBitCount != 32 || info.biCompression != BI_RGB ||
+        info.biWidth <= 0 || info.biWidth > 8192 ||
+        info.biHeight <= 0 || info.biHeight > 8192) {
+        fclose(file); return NULL;
+    }
+    size_t bytes = (size_t)info.biWidth * (size_t)info.biHeight * 4;
+    unsigned char *pixels = malloc(bytes);
+    if (!pixels || fseek(file, header.bfOffBits, SEEK_SET) != 0 ||
+        fread(pixels, bytes, 1, file) != 1) {
+        free(pixels); fclose(file); return NULL;
+    }
+    fclose(file);
+    *width = info.biWidth; *height = info.biHeight;
+    return pixels;
+}
+
+static int load_replay(const char *directory)
+{
+    char path[MAX_PATH], line[512];
+    int x = 0, y = 0, width = 0, height = 0;
+    marker_path(path, sizeof(path), directory, "SkillshotCityVR-stereo-diagnostics.txt");
+    FILE *report = fopen(path, "rb");
+    if (!report) return 0;
+    while (fgets(line, sizeof(line), report)) {
+        if (sscanf(line, "interface_rect=%d,%d %dx%d", &x, &y, &width, &height) == 4)
+            break;
+    }
+    fclose(report);
+    int rgb_width = 0, rgb_height = 0, mask_width = 0, mask_height = 0;
+    marker_path(path, sizeof(path), directory, "SkillshotCityVR-interface-alpha.bmp");
+    unsigned char *rgb = read_proof_pixels(path, &rgb_width, &rgb_height);
+    marker_path(path, sizeof(path), directory, "SkillshotCityVR-interface-alpha-mask.bmp");
+    unsigned char *mask = read_proof_pixels(path, &mask_width, &mask_height);
+    if (!rgb || !mask || rgb_width != mask_width || rgb_height != mask_height ||
+        x < 0 || y < 0 || width <= 0 || height <= 0 ||
+        width > rgb_width || height > rgb_height ||
+        x > rgb_width - width || y > rgb_height - height) {
+        free(rgb); free(mask); return 0;
+    }
+    unsigned char *rgba = malloc((size_t)width * height * 4);
+    if (!rgba) { free(rgb); free(mask); return 0; }
+    for (int row = 0; row < height; ++row) {
+        for (int column = 0; column < width; ++column) {
+            size_t source = ((size_t)(rgb_height - 1 - y - row) * rgb_width + x + column) * 4;
+            size_t target = ((size_t)row * width + column) * 4;
+            rgba[target] = rgb[source + 2];
+            rgba[target + 1] = rgb[source + 1];
+            rgba[target + 2] = rgb[source];
+            rgba[target + 3] = mask[source];
+        }
+    }
+    p_glGenTextures(1, &replay_texture);
+    p_glBindTexture(GL_TEXTURE_2D, replay_texture);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, 0x812F /* CLAMP_TO_EDGE */);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, 0x812F);
+    p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0,
+                   GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    p_glBindTexture(GL_TEXTURE_2D, 0);
+    free(rgba); free(rgb); free(mask);
+    return replay_texture != 0;
+}
+
+/* Read the actual transparent capture, preserving the game's read target.
+   Clearing only an inherited scissor rectangle leaves last frame's menu here. */
+static int capture_is_clear(void)
+{
+    GLint previous_read = 0;
+    unsigned char pixel[4] = {255, 255, 255, 255};
+    p_glGetIntegerv(0x8CAA /* GL_READ_FRAMEBUFFER_BINDING */, &previous_read);
+    p_glBindFramebuffer(0x8CA8 /* GL_READ_FRAMEBUFFER */,
+                        openxr_bridge_interface_alpha_framebuffer());
+    p_glReadPixels(480, 270, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    p_glBindFramebuffer(0x8CA8, (GLuint)previous_read);
+    return pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0 && pixel[3] == 0;
+}
+
+static int archive_proof(const char *base, const char *name)
+{
+    const char *files[] = {
+        "SkillshotCityVR-geometry-left.bmp",
+        "SkillshotCityVR-geometry-right.bmp",
+        "SkillshotCityVR-final-interface-left.bmp",
+        "SkillshotCityVR-final-interface-right.bmp",
+        "SkillshotCityVR-presented-left.bmp",
+        "SkillshotCityVR-presented-right.bmp",
+        "SkillshotCityVR-hud-base-left.bmp",
+        "SkillshotCityVR-hud-base-right.bmp",
+        "SkillshotCityVR-interface-alpha.bmp",
+        "SkillshotCityVR-interface-alpha-mask.bmp"
+    };
+    char directory[MAX_PATH], source[MAX_PATH], destination[MAX_PATH];
+    marker_path(directory, sizeof(directory), base, name);
+    CreateDirectoryA(directory, NULL);
+    for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); ++i) {
+        marker_path(source, sizeof(source), base, files[i]);
+        marker_path(destination, sizeof(destination), directory, files[i]);
+        int copied = 0;
+        for (int attempt = 0; attempt < 500 && !copied; ++attempt) {
+            copied = CopyFileA(source, destination, FALSE);
+            if (!copied) Sleep(10);
+        }
+        if (!copied) return 0;
+    }
+    return 1;
+}
+
+static int archive_center_proof(const char *base)
+{
+    const char *files[] = {
+        "SkillshotCityVR-geometry-left.bmp",
+        "SkillshotCityVR-geometry-right.bmp",
+        "SkillshotCityVR-presented-left.bmp",
+        "SkillshotCityVR-presented-right.bmp",
+        "SkillshotCityVR-hud-base-left.bmp",
+        "SkillshotCityVR-hud-base-right.bmp"
+    };
+    char directory[MAX_PATH], source[MAX_PATH], destination[MAX_PATH];
+    marker_path(directory, sizeof(directory), base, "proof-center");
+    CreateDirectoryA(directory, NULL);
+    for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); ++i) {
+        marker_path(source, sizeof(source), base, files[i]);
+        marker_path(destination, sizeof(destination), directory, files[i]);
+        int copied = 0;
+        for (int attempt = 0; attempt < 50 && !copied; ++attempt) {
+            copied = CopyFileA(source, destination, FALSE);
+            if (!copied) Sleep(10);
+        }
+        if (!copied) return 0;
+    }
+    return 1;
 }
 
 int main(void)
@@ -208,10 +445,20 @@ int main(void)
     if (!pixel_format || !SetPixelFormat(dc, pixel_format, &format)) return 6;
     HGLRC context = p_wglCreateContext(dc);
     if (!context || !p_wglMakeCurrent(dc, context)) return 7;
-    ShowWindow(window, SW_SHOWNA);
+    p_glBindFramebuffer = (void *)p_wglGetProcAddress("glBindFramebuffer");
+    if (!p_glBindFramebuffer) return 11;
+    const char *replay_directory = getenv("SKILLSHOTVR_INTEGRATION_UI_REPLAY");
+    if (replay_directory && replay_directory[0] && !load_replay(replay_directory)) return 12;
+    if (!getenv("SKILLSHOTVR_INTEGRATION_HIDDEN")) ShowWindow(window, SW_SHOWNA);
 
     int published_pairs = 0;
     int menu_frames = 0;
+    int alpha_mask_failures = 0;
+    int capture_clear_failures = 0;
+    int scissor_restore_failures = 0;
+    int capture_begin_failures = 0;
+    int menu_publish_failures = 0;
+    int proof_archive_failures = 0;
     int frame_limit = 2400;
     {
         const char *requested_frames = getenv("SKILLSHOTVR_INTEGRATION_FRAMES");
@@ -241,12 +488,31 @@ int main(void)
             openxr_bridge_set_geometry_fov(eye, -0.7853982f, 0.7853982f,
                                            0.5404195f, -0.5404195f);
             draw_world(frame, eye);
+            int center_announcement = frame >= 500 && frame < 900;
+            if (center_announcement) draw_center_announcement_test(eye);
             openxr_bridge_capture_native_mirror(1);
-            openxr_bridge_capture_hud_base(eye, 0.66f, 0.40f);
+            int eye_width = 0, eye_height = 0;
+            openxr_bridge_get_eye_size(&eye_width, &eye_height);
+            float hud_scale_y = (float)vr_hud_scale_y_for_eye(
+                0.66, (double)eye_width, (double)eye_height, 16.0 / 9.0);
+            openxr_bridge_capture_hud_base(eye, 0.66f, hud_scale_y);
+            if (center_announcement) draw_center_announcement();
             int captured = openxr_bridge_capture_eye(eye);
             if (captured && eye == 0) ++published_pairs;
             p_glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            openxr_bridge_begin_interface_alpha_capture();
+            /* SSC disables destination alpha writes for its ordinary window.
+               Reproduce that state so an RGB-only invisible menu cannot pass. */
+            p_glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_FALSE);
+            p_glScissor(8, 8, 16, 16);
+            p_glEnable(GL_SCISSOR_TEST);
+            if (!openxr_bridge_begin_interface_alpha_capture())
+                ++capture_begin_failures;
+            else if (!capture_is_clear()) ++capture_clear_failures;
+            if (!p_glIsEnabled(GL_SCISSOR_TEST)) ++scissor_restore_failures;
+            p_glDisable(GL_SCISSOR_TEST);
+            GLint capture_mask[4];
+            p_glGetIntegerv(GL_COLOR_WRITEMASK, capture_mask);
+            if (!capture_mask[3]) ++alpha_mask_failures;
             int heavy = frame >= 1000 && (((frame - 1000) / 100) & 1) == 0;
             if (frame == 1000) {
                 char proof_marker[MAX_PATH];
@@ -254,6 +520,14 @@ int main(void)
                 marker_path(proof_marker, sizeof(proof_marker), base,
                             "SkillshotCityVR-geometry-proof.txt");
                 write_marker(proof_marker, "capture completed interface eyes\n");
+            }
+            if (frame == 600) {
+                char proof_marker[MAX_PATH];
+                openxr_bridge_request_fresh_geometry_proof();
+                marker_path(proof_marker, sizeof(proof_marker), base,
+                            "SkillshotCityVR-geometry-proof.txt");
+                write_marker(proof_marker,
+                             "capture ordinary center announcement pair\n");
             }
             if (frame == 1400) {
                 char proof_marker[MAX_PATH];
@@ -266,11 +540,25 @@ int main(void)
             openxr_bridge_set_interface_load(heavy ? 1000 : 120,
                                              heavy ? 80000 : 5000);
             if (heavy) {
-                draw_interface();
+                draw_interface(frame);
                 ++menu_frames;
             }
-            openxr_bridge_finish_interface_alpha_capture(heavy);
-            openxr_bridge_set_geometry_active(1);
+            /* Internal transfer must ignore the game's current clip while
+               leaving it enabled for the next authored draw. */
+            p_glEnable(GL_SCISSOR_TEST);
+            if (!openxr_bridge_finish_interface_alpha_capture(heavy) && heavy)
+                ++menu_publish_failures;
+            if (!p_glIsEnabled(GL_SCISSOR_TEST)) ++scissor_restore_failures;
+            p_glDisable(GL_SCISSOR_TEST);
+            p_glGetIntegerv(GL_COLOR_WRITEMASK, capture_mask);
+            if (capture_mask[3]) ++alpha_mask_failures;
+            /* Exercise the real round-complete handoff: geometry disappears,
+               the completed desktop frame is captured, and OpenXR must use a
+               single flat quad rather than projecting identical pixels from
+               two eye poses. */
+            int round_transition = frame >= 2050 && frame < 2120;
+            openxr_bridge_set_geometry_active(!round_transition);
+            if (round_transition) openxr_bridge_capture_flat_frame();
             openxr_bridge_present_mirror_eye(0, 1.0f);
             openxr_bridge_present_desktop_interface();
             if (frame == 999) {
@@ -287,26 +575,48 @@ int main(void)
             }
         }
         SwapBuffers(dc);
+        if (frame == 800 && !archive_center_proof(base))
+            ++proof_archive_failures;
+        if (frame == 1200 && !archive_proof(base, "proof-first"))
+            ++proof_archive_failures;
+        if (frame == 1600 && !archive_proof(base, "proof-second"))
+            ++proof_archive_failures;
         Sleep(10);
     }
 
-    int passed = published_pairs >= 50 && menu_frames >= 100;
+    int passed = published_pairs >= frame_limit / 4 && menu_frames >= 100 &&
+        alpha_mask_failures == 0 && capture_clear_failures == 0 &&
+        scissor_restore_failures == 0 && capture_begin_failures == 0 &&
+        menu_publish_failures == 0 && proof_archive_failures == 0;
     DeleteFileA(openxr_marker);
     DeleteFileA(geometry_marker);
+    printf("integration published_pairs=%d menu_frames=%d status=%s\n",
+           published_pairs, menu_frames, openxr_bridge_status());
+    fflush(stdout);
+    int shutdown_once = openxr_bridge_shutdown();
+    int shutdown_twice = openxr_bridge_shutdown();
+    printf("integration shutdown_once=%d shutdown_twice=%d status=%s\n",
+           shutdown_once, shutdown_twice, openxr_bridge_status());
+    fflush(stdout);
+    if (!shutdown_once || !shutdown_twice) passed = 0;
     char result_path[MAX_PATH];
     marker_path(result_path, sizeof(result_path), base, "integration-result.txt");
     FILE *result = fopen(result_path, "wb");
     if (result) {
-        fprintf(result, "published_pairs=%d menu_frames=%d status=%s\n",
-                published_pairs, menu_frames, openxr_bridge_status());
+        fprintf(result, "passed=%d published_pairs=%d menu_frames=%d alpha_mask_failures=%d "
+                "capture_clear_failures=%d scissor_restore_failures=%d "
+                "capture_begin_failures=%d menu_publish_failures=%d "
+                "proof_archive_failures=%d shutdown_once=%d shutdown_twice=%d status=%s\n",
+                passed, published_pairs, menu_frames, alpha_mask_failures,
+                capture_clear_failures, scissor_restore_failures,
+                capture_begin_failures, menu_publish_failures,
+                proof_archive_failures, shutdown_once, shutdown_twice,
+                openxr_bridge_status());
         fclose(result);
     }
-    printf("integration published_pairs=%d menu_frames=%d status=%s\n",
-           published_pairs, menu_frames, openxr_bridge_status());
-    fflush(stdout);
-    /* The product process owns the bridge for its whole lifetime. This test
-       deliberately has no runtime teardown API, so terminate after recording
-       the result instead of destroying GL while the XR frame thread is live. */
-    ExitProcess(passed ? 0 : 8);
+    p_wglMakeCurrent(NULL, NULL);
+    p_wglDeleteContext(context);
+    ReleaseDC(window, dc);
+    DestroyWindow(window);
     return passed ? 0 : 8;
 }

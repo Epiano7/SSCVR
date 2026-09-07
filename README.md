@@ -41,8 +41,9 @@ Follow [Building](docs/BUILDING.md), run `scripts/New-ReleasePackage.ps1`, and t
 This release supports:
 
 - Skillshot City `v1.990`
+- Skillshot City `v1.991`
 
-The installer still verifies the exact executable revision so that an unknown game update cannot receive unsafe hooks. Both known `v1.990` revisions passed the automated checks described in [the validation record](docs/VALIDATION.md); the newest revision's physical-headset check is still pending. Game versions not listed above may work but are not supported.
+The installer still verifies the exact executable revision so that an unknown game update cannot receive unsafe hooks. Supported revisions passed the automated checks described in [the validation record](docs/VALIDATION.md); the newest `v1.991` revision's physical-headset check is still pending. Game versions not listed above may work but are not supported.
 
 ## What currently works
 
@@ -78,17 +79,27 @@ Saved settings are stored as `SkillshotCityVR-camera-live.ini` inside the isolat
 | Input | Action |
 |---|---|
 | `F10` | Save an internal game-frame capture |
-| `Shift` + `1` | Request a capture of both headset eyes |
+| `Shift` + `1` | Save both submitted eyes and a stereo diagnostic set |
 
-The two-eye capture requires the headset capture watcher and is currently considered a development feature; see the known-issues checklist.
+`Shift` + `1` is self-contained and does not require the external capture watcher.
+It saves the final left/right OpenXR projection textures plus side-by-side,
+50/50 overlay, red/cyan alignment, four-times-amplified difference, and
+approximate lens-preview BMPs in the isolated game's directory. A companion
+`SkillshotCityVR-stereo-diagnostics.txt` records dimensions, the interface
+rectangle, and pixel-difference statistics. The lens image is only a radial
+visualization: OpenXR does not expose the Quest's private optical calibration,
+so it is not a substitute for a physical-headset check.
 
 ## Current issues
 
 These are the main things I am working on. If a fork fixes one, feel free to open a pull request and link the test results.
 
-- [ ] Make the Tab and Escape interfaces remain visible in both eyes. In the latest physical test, they flicker once and then disappear.
+- [x] Keep the Tab and Escape interfaces visible, correctly colored, and aligned in both eyes; confirmed in a physical Quest 3 test and covered by simulator-submitted eye checks.
 - [ ] Verify that the level-up interface and other full-screen overlays use the same fixed interface path.
-- [ ] Fix the two-eye `Shift+1` capture watcher, which can leave a request marker without producing the external headset capture.
+- [ ] Verify in a physical headset that returning from a round uses the same monoscopic panel as the startup menu, without crossed-eye double vision.
+- [x] Make `Shift+1` generate a self-contained two-eye alignment and approximate-lens diagnostic set without the external watcher.
+- [x] Add deterministic, idempotent OpenXR shutdown and verify repeated session/instance teardown in Meta XR Simulator.
+- [ ] Verify that Quest Link remains immediately usable after closing SSCVR on a physical headset.
 - [ ] Complete a long physical-headset soak test after the WGL/D3D interop lock fix. Earlier builds could freeze the headset view after roughly one minute.
 - [ ] Hold a stable 72 Hz during a full singleplayer round (this is dependent on your PC specs; read below for mine if you want to compare).
 - [ ] Improve HUD and text clarity without increasing world-render cost.
@@ -97,7 +108,7 @@ These are the main things I am working on. If a fork fixes one, feel free to ope
 - [ ] Route audio to the active OpenXR/Quest Link device without requiring a Windows output-device change (there is currently no option in game to set an output audio device).
 - [ ] Replace the temporary keyboard camera controls with an in-game settings screen/GUI.
 - [x] Add and round-trip test a clean installer and manifest-guarded uninstaller for a verified, separate Steam copy.
-- [x] Locate and verify the gameplay-render, world-draw, and culling addresses for both known Skillshot City `v1.990` executable revisions (latest as of 8/26/2026).
+- [x] Locate and verify the gameplay-render, world-draw, and culling addresses for supported Skillshot City `v1.990` and `v1.991` executable revisions (latest as of 9/3/2026).
 - [x] Rebuild and install the package from a fresh GitHub clone, then confirm both live hooks in Meta XR Simulator.
 - [ ] Test more aspect ratios, refresh rates, and OpenXR runtimes.
 - [ ] Decide what online modes, if any, are safe to support. Multiplayer and ranked have not been extensively tested with this mod (from the few rounds I have played, I have placed top 3 every time).
