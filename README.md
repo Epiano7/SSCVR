@@ -57,7 +57,7 @@ The installer still verifies the exact executable revision so that an unknown ga
 
 ## Controls
 
-SSCVR keeps Skillshot City's normal keyboard-and-mouse controls. The following temporary shortcuts control the VR camera without using the middle mouse button or interfering with ordinary gameplay inputs.
+SSCVR keeps Skillshot City's normal keyboard-and-mouse controls. The following temporary shortcuts control the VR camera without interfering with ordinary gameplay inputs.
 
 | Input | Action |
 |---|---|
@@ -87,8 +87,7 @@ It saves the final left/right OpenXR projection textures plus side-by-side,
 approximate lens-preview BMPs in the isolated game's directory. A companion
 `SkillshotCityVR-stereo-diagnostics.txt` records dimensions, the interface
 rectangle, and pixel-difference statistics. The lens image is only a radial
-visualization: OpenXR does not expose the Quest's private optical calibration,
-so it is not a substitute for a physical-headset check.
+visualization: OpenXR does not expose the Quest's private optical calibration.
 
 ## Current issues
 
@@ -116,8 +115,9 @@ These are the main things I am working on. If a fork fixes one, feel free to ope
 ## Important warning
 
 This repository does not contain Skillshot City, its assets, or its Steam files. You need to own and install the game yourself. Development should happen on a separate copied instance, never directly in the normal Steam folder (the installer will do this automatically).
+### The game is free on steam if you do not own a copy.
 
-SSCVR intercepts OpenGL calls inside the copied game process. It has not been tested with ranked or casual multiplayer. Use singleplayer while the project is in this state.
+SSCVR intercepts OpenGL calls inside the copied game process. It has not been fully tested with ranked or casual multiplayer. Singleplayer is recommended if you care about your ranking!
 
 ## Test setup
 
@@ -126,14 +126,14 @@ The setup that I have used for development is as follows:
 - Meta Quest 3 over a wired Meta Quest Link connection
 - Meta OpenXR runtime and Oculus Virtual Audio Device
 - Windows 11 Pro 64-bit, build `26200`
-- AMD Ryzen 9 5950X; the test OS exposed 14 cores and 28 logical processors
+- AMD Ryzen 9 5950X; mine specifically has 14 cores and 28 threads since core 0 failed and I had to disable it :(
 - NVIDIA GeForce RTX 4060 Ti 8 GB
 - NVIDIA driver `610.74`, OpenGL `4.6.0`
 - 32 GB system memory
 - Game window at `1536x864`
-- OpenXR eye swapchains at `1536x1666` per eye, reduced from the runtime's `2272x2464` recommendation
-- Meta Link render resolution commonly set to `4480x2400` (`1.1x`) during headset tests
-- 72 Hz as the intended performance target
+- OpenXR eye swapchains at `1536x1666` per eye
+- Meta Link render resolution set to `4480x2400` (`1.1x`)
+- 72 Hz for the headset refresh rate
 
 ## How it works
 
